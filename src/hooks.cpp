@@ -600,8 +600,31 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
     return true;
 }
 
+// Debugging: skip_vs=<hash>[,<hash>...] in gw3vr.ini hides the draws of those vertex shaders
+// (re-read whenever the file is saved), to find which shader draws something on screen.
+static uint32_t g_skipVs[8];
+
+static void ReadSkipList()
+{
+    memset(g_skipVs, 0, sizeof g_skipVs);
+    std::string list = IniString("skip_vs");
+    int n = 0;
+    for (size_t at = 0; at < list.size() && n < 8;)
+    {
+        size_t comma = list.find(',', at);
+        std::string one = list.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        if (!one.compare(0, 3, "vs_")) one = one.substr(3);
+        uint32_t h = (uint32_t)strtoul(one.c_str(), nullptr, 16);
+        if (h) g_skipVs[n++] = h;
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+    if (n) Log("skip_vs: hiding %d vertex shader(s), first vs_%08x", n, g_skipVs[0]);
+}
+
 template <typename F> static HRESULT Draw(F draw)
 {
+    for (uint32_t h : g_skipVs) if (h && h == g_vsHash) return S_OK;
     if (g_vr && g_rtStereo && !g_rtFinal && g_vsHash == kHudText && g_scoreDepth == 1 && stereo::HaveMatrix())
     {
         stereo::EyeMatrix(0, false, false);
@@ -855,7 +878,8 @@ static void VrNextFrame()
     g_stage = "game";
     if (test::RecentreRequested()) stereo::Recentre();
     test::CaptureKey();
-    if (test::SettingsChanged()) stereo::LoadSettings();
+    static bool skipRead;
+    if (test::SettingsChanged() || !skipRead) { stereo::LoadSettings(); ReadSkipList(); skipRead = true; }
     stereo::SetEyes(eyes, tracked);
 }
 
