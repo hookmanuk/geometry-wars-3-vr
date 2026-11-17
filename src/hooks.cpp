@@ -5,9 +5,12 @@
 #include "common.h"
 #include "stereo.h"
 #include "test.h"
+#include "timestep.h"
+#include <cmath>
 #include <unordered_map>
 #include <algorithm>
 #include <d3dcompiler.h>
+#include <vector>
 
 static IDirect3DDevice9* g_dev;
 static FILE* g_dump;
@@ -223,6 +226,84 @@ static void RecordFrameCost()
     g_statStart = now;
 }
 
+// ---- frame trace ----
+// "gw3vr_trace.req" (optionally holding a frame count) records one row per frame to
+// gw3vr_trace_N.csv: where the time went, what the runtime predicted, and whether the game's
+// world moved since the previous frame (a hash of every object transform it set).
+struct TraceRow
+{
+    unsigned frame;
+    double start;                 // ms, when the frame slot was handed over
+    double game, flush, copy, end, present, wait, begin, locate;
+    long long displayTime, period;
+    uint32_t worldHash;
+    float camX, camY, camZ;
+    unsigned draws;
+};
+static std::vector<TraceRow> g_trace;
+static unsigned g_traceWanted;
+static int g_traceIndex;
+static TraceRow g_row;
+static uint32_t g_worldHash = 2166136261u;
+static bool g_camSeen;
+
+static double QpcMs()
+{
+    static LARGE_INTEGER f;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart * 1000.0 / f.QuadPart;
+}
+
+static void TraceCheckRequest()
+{
+    if (g_traceWanted || (g_frame % 30)) return;
+    std::string req = g_dir + "gw3vr_trace.req";
+    FILE* f = fopen(req.c_str(), "r");
+    if (!f) return;
+    unsigned n = 0;
+    if (fscanf(f, "%u", &n) != 1 || !n) n = 1000;
+    fclose(f);
+    DeleteFileA(req.c_str());
+    g_traceWanted = n;
+    g_trace.clear();
+    g_trace.reserve(n);
+    Log("frame trace: recording %u frames", n);
+}
+
+static void TraceFinish()
+{
+    char name[64];
+    sprintf(name, "gw3vr_trace_%d.csv", g_traceIndex++);
+    FILE* f = fopen((g_dir + name).c_str(), "w");
+    if (f)
+    {
+        fprintf(f, "frame,start_ms,game_ms,flush_ms,copy_ms,endframe_ms,present_ms,wait_ms,begin_ms,locate_ms,display_ms,period_ms,world_hash,cam_x,cam_y,cam_z,draws\n");
+        for (auto& r : g_trace)
+            fprintf(f, "%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%08x,%g,%g,%g,%u\n", r.frame, r.start, r.game, r.flush, r.copy, r.end,
+                r.present, r.wait, r.begin, r.locate, r.displayTime / 1e6, r.period / 1e6, r.worldHash, r.camX, r.camY, r.camZ, r.draws);
+        fclose(f);
+    }
+    Log("frame trace: %u frames written to %s", (unsigned)g_trace.size(), name);
+    g_traceWanted = 0;
+    g_trace.clear();
+}
+
+// ---- draw census ----
+// Logs each new combination of shaders, camera kind and target once, with the frame it first
+// appeared in. Something that appears only at certain moments (score pop-ups, explosions)
+// shows up as a new line at that moment.
+static void Census(const char* kind)
+{
+    static std::unordered_map<uint64_t, int> seen;
+    if (!g_vr || !IniInt("draw_census", 0)) return;
+    uint64_t key = ((uint64_t)g_vsHash << 32) ^ g_psHash ^ ((uint64_t)(uintptr_t)kind << 7) ^ (g_rtFinal ? 1 : 0) ^ (g_rtStereo ? 2 : 0);
+    if (seen[key]++) return;
+    Log("census: frame %u vs_%08x ps_%08x kind %s target %s", g_frame, g_vsHash, g_psHash, kind,
+        g_rtFinal ? "frame" : g_rtStereo ? "eye-target" : "other");
+}
+
 // Where the render thread is, for the stall report below.
 static const char* volatile g_stage = "game";
 
@@ -371,6 +452,7 @@ template <typename F> static HRESULT Draw(F draw)
             if (seen[g_vsHash]++ < 8) Log("unhandled: vs_%08x ps_%08x draws into the eyes without the game's matrix, frame %u: %s", g_vsHash, g_psHash, g_frame, g_drawNote);
         }
         EnsureViewport();
+        Census(g_vsUsesViewProj ? "unplaced" : "own-position");
         if (g_vr && g_rtStereo && g_psHash == kFocusBlur)
         {
             // The pass measures distance from a point given in c5 (scaled by c6.zw) across the
@@ -424,6 +506,7 @@ template <typename F> static HRESULT Draw(F draw)
             }
         }
         hr = draw();
+        if (eye == 0) Census(stereo::LastKind());
     }
     if (steady) o_SetVSConstF(g_dev, 4, g_gameConst[4], 5); // c4-c8 back to the game's values
     return hr;
@@ -499,14 +582,27 @@ static void FlushD3D9()
 // End of the game's frame with VR on: submit the eyes and mirror one to the window.
 static void VrFrame()
 {
+    double tGameEnd = QpcMs();
     EnsureViewport();
     g_stage = "waiting for the GPU to finish D3D9 work";
     FlushD3D9();
+    double tFlushed = QpcMs();
     RecordFrameCost();
     g_stage = "screenshot";
     test::Screenshot(g_dev, g_finalSurf);
     g_stage = "submitting the eyes (xrEndFrame)";
     vr::EndFrame(g_finalShare);
+    if (g_traceWanted)
+    {
+        const vr::Timing& t = vr::LastTiming();
+        g_row.frame = g_frame;
+        g_row.game = tGameEnd - g_row.start;
+        g_row.flush = tFlushed - tGameEnd;
+        g_row.copy = t.copyMs;
+        g_row.end = t.endMs;
+        g_row.worldHash = g_worldHash;
+        g_row.draws = g_draws;
+    }
     g_stage = "mirror and present";
     if (g_backbuffer && g_finalSurf)
     {
@@ -524,6 +620,46 @@ static void VrNextFrame()
     g_stage = "waiting for the headset's next frame (xrWaitFrame)";
     bool tracked = vr::BeginFrame(eyes);
     QueryPerformanceCounter(&g_workStart);
+    {
+        // sim_rate: 0 = the headset's refresh rate (default), N = N Hz, -1 = the game's own 60 Hz.
+        // The runtime's predicted period varies from frame to frame (SteamVR reports half and
+        // third rates now and then), so the rate is the most common one over the first 90 frames,
+        // chosen once.
+        static int simRate = IniInt("sim_rate", 0);
+        static int samples, chosen;
+        static std::unordered_map<int, int> votes;
+        long long period = vr::LastTiming().displayPeriod;
+        if (simRate > 0) timestep::Apply(simRate);
+        else if (simRate == 0 && vr::RefreshRate() > 0) timestep::Apply(floor(vr::RefreshRate() + 0.5));
+        else if (simRate == 0 && !chosen && period > 0)
+        {
+            votes[(int)floor(1e9 / period + 0.5)]++;
+            if (++samples == 90)
+            {
+                for (auto& v : votes) if (!chosen || v.second > votes[chosen]) chosen = v.first;
+                timestep::Apply(chosen);
+            }
+        }
+    }
+    if (g_traceWanted)
+    {
+        if (g_row.frame)
+        {
+            g_trace.push_back(g_row);
+            if (g_trace.size() >= g_traceWanted) TraceFinish();
+        }
+        const vr::Timing& t = vr::LastTiming();
+        g_row = {};
+        g_row.wait = t.waitMs;
+        g_row.begin = t.beginMs;
+        g_row.locate = t.locateMs;
+        g_row.displayTime = t.displayTime;
+        g_row.period = t.displayPeriod;
+    }
+    g_worldHash = 2166136261u;
+    g_camSeen = false;
+    g_row.start = QpcMs();
+    TraceCheckRequest();
     g_stage = "game";
     if (test::RecentreRequested()) stereo::Recentre();
     if (test::SettingsChanged()) stereo::LoadSettings();
@@ -561,7 +697,9 @@ static HRESULT __stdcall H_Present(IDirect3DDevice9* d, const RECT* a, const REC
         return o_Present(d, a, b, w, r);
     }
     VrFrame();
+    double tp = QpcMs();
     HRESULT hr = o_Present(d, a, b, w, r);
+    g_row.present = QpcMs() - tp;
     VrNextFrame();
     return hr;
 }
@@ -575,7 +713,9 @@ static HRESULT __stdcall H_PresentEx(IDirect3DDevice9Ex* d, const RECT* a, const
         return o_PresentEx(d, a, b, w, r, f);
     }
     VrFrame();
+    double tp = QpcMs();
     HRESULT hr = o_PresentEx(d, a, b, w, r, f);
+    g_row.present = QpcMs() - tp;
     VrNextFrame();
     return hr;
 }
@@ -828,6 +968,12 @@ static HRESULT __stdcall H_SetVSConstF(IDirect3DDevice9* d, UINT reg, const floa
 {
     DumpConsts("VSConst", reg, f, count);
     if (reg == 0 && count >= 4) stereo::SetGameMatrix(f);
+    if (g_traceWanted)
+    {
+        if (reg == 13)
+            for (UINT i = 0; i < count * 4; i++) { uint32_t u; memcpy(&u, &f[i], 4); g_worldHash = (g_worldHash ^ u) * 16777619u; }
+        if (reg == 4 && !g_camSeen && fabsf(f[0]) + fabsf(f[1]) + fabsf(f[2]) > 1) { g_row.camX = f[0]; g_row.camY = f[1]; g_row.camZ = f[2]; g_camSeen = true; }
+    }
     if (reg < 16) memcpy(g_gameConst[reg], f, (reg + count > 16 ? 16 - reg : count) * 16);
     return o_SetVSConstF(d, reg, f, count);
 }
@@ -863,6 +1009,7 @@ void InstallDeviceHooks(IDirect3DDevice9* dev)
     g_dev = dev;
     g_vr = vr::Active();
     if (g_vr) stereo::LoadSettings();
+    else if (IniInt("sim_rate", 0) > 0) timestep::Apply(IniInt("sim_rate", 0)); // flat play at a high refresh rate
     test::Install();
     void** vt = *(void***)dev;
     IDirect3DDevice9Ex* ex = nullptr;

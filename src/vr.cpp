@@ -27,6 +27,17 @@ namespace
     XrTime g_displayTime;
     XrView g_views[2];
     unsigned g_eyeW, g_eyeH;
+    vr::Timing g_timing;
+    float g_refreshRate; // from XR_FB_display_refresh_rate, 0 when the runtime does not say
+
+    double NowMs()
+    {
+        static LARGE_INTEGER f;
+        if (!f.QuadPart) QueryPerformanceFrequency(&f);
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return t.QuadPart * 1000.0 / f.QuadPart;
+    }
     DXGI_FORMAT g_format;
     bool g_srgb;
 
@@ -240,6 +251,8 @@ float4 ps(V i) : SV_Target
 }
 
 bool vr::Active() { return g_active; }
+float vr::RefreshRate() { return g_refreshRate; }
+const vr::Timing& vr::LastTiming() { return g_timing; }
 unsigned vr::EyeWidth() { return g_eyeW; }
 unsigned vr::EyeHeight() { return g_eyeH; }
 
@@ -249,12 +262,23 @@ bool vr::Init()
     std::string runtime = IniString("runtime_json");
     if (!runtime.empty()) SetEnvironmentVariableA("XR_RUNTIME_JSON", runtime.c_str());
 
-    const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
+    // The refresh-rate extension, when the runtime has it, gives the headset's actual rate.
+    bool haveRate = false;
+    {
+        uint32_t count = 0;
+        xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr);
+        std::vector<XrExtensionProperties> props(count, { XR_TYPE_EXTENSION_PROPERTIES });
+        if (count && XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, props.data())))
+            for (auto& p : props)
+                if (!strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME)) haveRate = true;
+        Log("OpenXR: %u extensions, %s %s", count, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME, haveRate ? "available" : "not available");
+    }
+    const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME };
     XrInstanceCreateInfo ici{ XR_TYPE_INSTANCE_CREATE_INFO };
     strcpy(ici.applicationInfo.applicationName, "Geometry Wars 3 VR");
     strcpy(ici.applicationInfo.engineName, "gw3vr");
     ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-    ici.enabledExtensionCount = 1;
+    ici.enabledExtensionCount = haveRate ? 2 : 1;
     ici.enabledExtensionNames = exts;
     XrResult created = xrCreateInstance(&ici, &g_instance);
     if (XR_FAILED(created))
@@ -293,6 +317,15 @@ bool vr::Init()
     sci.systemId = g_system;
     if (!Check(xrCreateSession(g_instance, &sci, &g_session), "xrCreateSession")) return false;
 
+    if (haveRate)
+    {
+        PFN_xrGetDisplayRefreshRateFB getRate = nullptr;
+        xrGetInstanceProcAddr(g_instance, "xrGetDisplayRefreshRateFB", (PFN_xrVoidFunction*)&getRate);
+        float rate = 0;
+        if (getRate && XR_SUCCEEDED(getRate(g_session, &rate))) g_refreshRate = rate;
+        Log("OpenXR: display refresh rate %.2f Hz", g_refreshRate);
+    }
+
     XrReferenceSpaceCreateInfo rsi{ XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
     rsi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
     rsi.poseInReferenceSpace.orientation.w = 1.0f;
@@ -312,8 +345,16 @@ bool vr::BeginFrame(Eye eyes[2])
     if (!g_running) return false;
 
     XrFrameState fs{ XR_TYPE_FRAME_STATE };
+    double t0 = NowMs();
     if (!Check(xrWaitFrame(g_session, nullptr, &fs), "xrWaitFrame")) return false;
+    double t1 = NowMs();
     if (!Check(xrBeginFrame(g_session, nullptr), "xrBeginFrame")) return false;
+    double t2 = NowMs();
+    g_timing.waitMs = t1 - t0;
+    g_timing.beginMs = t2 - t1;
+    g_timing.displayTime = fs.predictedDisplayTime;
+    g_timing.displayPeriod = fs.predictedDisplayPeriod;
+    g_timing.shouldRender = fs.shouldRender == XR_TRUE;
     g_frameBegun = true;
     g_displayTime = fs.predictedDisplayTime;
     g_shouldRender = fs.shouldRender == XR_TRUE;
@@ -331,6 +372,7 @@ bool vr::BeginFrame(Eye eyes[2])
         g_shouldRender = false;
         return false;
     }
+    g_timing.locateMs = NowMs() - t2;
     for (int e = 0; e < 2; e++)
     {
         const XrView& v = g_views[e];
@@ -357,6 +399,7 @@ void vr::EndFrame(HANDLE sharedSbs)
     ei.displayTime = g_displayTime;
     ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 
+    double t0 = NowMs();
     if (g_shouldRender && sharedSbs)
     {
         if (sharedSbs != g_sharedHandle)
@@ -414,6 +457,9 @@ void vr::EndFrame(HANDLE sharedSbs)
             ei.layers = layers;
         }
     }
+    double t1 = NowMs();
     Check(xrEndFrame(g_session, &ei), "xrEndFrame");
+    g_timing.copyMs = t1 - t0;
+    g_timing.endMs = NowMs() - t1;
 
 }

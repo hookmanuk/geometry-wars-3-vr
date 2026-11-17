@@ -92,6 +92,7 @@ namespace
     bool g_have;
     bool g_dirty;
     bool g_overlay;         // the matrix in g_out was made for the canvas pass
+    const char* g_kind = "none";
     bool g_steady;          // the matrix in g_out was made for a backdrop draw
 
     // The level camera's direction when the level began (rows: right, up, forward), and the
@@ -167,6 +168,7 @@ namespace
         double cx, cy, cz, oy = 0, shift = 0;
         if (g_overlay)
         {
+            g_kind = "canvas";
             // The canvas lies in the world's z = 0 plane; its depth is the origin's depth.
             double plane = view.m[11] > 1 ? view.m[11] : 434.6;
             cz = g_hudDistance / plane;
@@ -175,12 +177,14 @@ namespace
         }
         else if (identity)
         {
+            g_kind = "backdrop";
             cz = 1 / g_backdropScale;
             cx = cz * sx / g_sceneSx;
             cy = cz * sy / g_sceneSy;
         }
         else if (nearUnits < 50)
         {
+            g_kind = "menu";
             cx = cy = cz = 1 / g_menuScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
@@ -189,6 +193,7 @@ namespace
         }
         else
         {
+            g_kind = "level";
             cx = cy = cz = 1 / g_worldScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
@@ -363,6 +368,8 @@ bool stereo::SteadyCamera(SteadyValues* out)
     out->up = g_steadyUp;
     return true;
 }
+
+const char* stereo::LastKind() { return g_kind; }
 
 const float* stereo::EyeMatrix(int eye, bool overlay, bool backdrop)
 {

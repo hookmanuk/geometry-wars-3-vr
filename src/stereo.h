@@ -6,6 +6,9 @@ namespace stereo
 {
     void LoadSettings();
 
+    // Which kind of camera the last EyeMatrix result was made for: level, menu, backdrop or canvas.
+    const char* LastKind();
+
     // The eyes for the frame about to be drawn. "tracked" is false for the stand-in eyes used
     // while no headset pose is available.
     void SetEyes(const Eye eyes[2], bool tracked);
