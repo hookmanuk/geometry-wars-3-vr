@@ -1,0 +1,5 @@
+out/
+deps/
+scratch/
+*.obj
+*.pdb
