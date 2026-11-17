@@ -168,12 +168,18 @@ void test::Screenshot(IDirect3DDevice9* dev, IDirect3DSurface9* surface)
 {
     std::string req = g_dir + "gw3vr_shot.req";
     if (GetFileAttributesA(req.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    // The request holds a path, which may contain spaces, optionally followed by " full".
     char path[MAX_PATH] = {}, mode[16] = {};
     FILE* f = fopen(req.c_str(), "r");
     if (!f) return;
-    int n = fscanf(f, "%259s %15s", path, mode);
+    char line[MAX_PATH + 16] = {};
+    bool got = fgets(line, sizeof line, f) != nullptr;
     fclose(f);
-    if (n < 1) return; // still being written
+    if (!got || !line[0]) return; // still being written
+    size_t len = strlen(line);
+    while (len && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) line[--len] = 0;
+    if (len > 5 && !strcmp(line + len - 5, " full")) { strcpy(mode, "full"); line[len - 5] = 0; }
+    strncpy(path, line, MAX_PATH - 1);
     DeleteFileA(req.c_str());
 
     IDirect3DSurface9* own = nullptr;
