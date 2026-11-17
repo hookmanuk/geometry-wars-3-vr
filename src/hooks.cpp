@@ -531,7 +531,7 @@ O main(I i)
 
 static void CreateScoreResources()
 {
-    if (g_scoreDepth < 0) g_scoreDepth = IniString("score_depth") == "hud" ? 0 : 1;
+    if (g_scoreDepth < 0) g_scoreDepth = IniString("score_depth") == "level" ? 1 : 0; // hud unless asked for
     if (!g_scoreDepth || !g_depthTex || g_vsScore) return;
     ID3DBlob* code = nullptr; ID3DBlob* err = nullptr;
     if (SUCCEEDED(D3DCompile(kScoreShader, strlen(kScoreShader), nullptr, nullptr, nullptr, "main", "vs_3_0", 0, 0, &code, &err)))
