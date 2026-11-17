@@ -56,6 +56,10 @@ static void RegisterShader(void* shader, const DWORD* code, const char* kind)
     if (kind[0] == 'v')
         for (uint32_t b : kBackdropShaders) if (b == h) info.backdrop = true;
     g_shaders[shader] = info;
+    // Shader bytecode is written out only when asked for (dump_shaders=1), for tools/ctab.py and fxc.
+    static int dumpShaders = -1;
+    if (dumpShaders < 0) dumpShaders = IniInt("dump_shaders", 0);
+    if (!dumpShaders) return;
     CreateDirectoryA((g_dir + "gw3vr_shaders").c_str(), nullptr);
     char name[64];
     sprintf(name, "gw3vr_shaders\\%s_%08x.bin", kind, h);

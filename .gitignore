@@ -3,3 +3,4 @@ deps/
 scratch/
 *.obj
 *.pdb
+save_backup/
