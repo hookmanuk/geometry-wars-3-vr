@@ -12,6 +12,10 @@
 //              Shown at menu_scale, which makes the floor a floor.
 //   backdrop - an identity view inside the scene pass: a quad fixed to the game's camera.
 //              Kept as far-off scenery covering the game's own frame.
+//              With steady_background on, the backdrop's shaders get a camera that keeps
+//              the direction it had when the level began: the game's camera circles the
+//              level as the ship moves, and without this the whole backdrop would swing
+//              round the player. The level turns in front of a still backdrop instead.
 //   canvas   - everything drawn after post-processing: HUD and menu panels on a 640x360
 //              canvas. Shown as a panel hud_distance metres away.
 //
@@ -47,6 +51,7 @@ namespace
     double g_hudSize;       // canvas: 1 = the angle the game drew it at
     double g_hudOffsetY;    // canvas: metres up
     double g_nearMetres;    // closest distance drawn
+    bool g_steadyBackground;
 
     Eye g_eyes[2];
 
@@ -60,6 +65,14 @@ namespace
     bool g_have;
     bool g_dirty;
     bool g_overlay;         // the matrix in g_out was made for the canvas pass
+    bool g_steady;          // the matrix in g_out was made for a backdrop draw
+
+    // The level camera's direction when the level began (rows: right, up, forward), and the
+    // camera position and direction that go with the steady view.
+    unsigned g_frame, g_lastLevelFrame;
+    double g_ref[9];
+    bool g_steadyValid;
+    float g_steadyPos[4], g_steadyDir[4], g_steadyRight[4], g_steadyUp[4];
     float g_out[2][16];
 
     // Projection scales of the last scene camera, used to lay the HUD over the same field of view.
@@ -148,6 +161,28 @@ namespace
             cx = cy = cz = 1 / g_worldScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
+            if (g_frame - g_lastLevelFrame > 1)
+                for (int i = 0; i < 3; i++)
+                    for (int j = 0; j < 3; j++) g_ref[i * 3 + j] = view.m[i * 4 + j];
+            g_lastLevelFrame = g_frame;
+            g_steadyValid = g_steadyBackground;
+            if (g_steady && g_steadyBackground)
+            {
+                // Same distance from the world's centre, original direction, centre on the axis.
+                double dist = sqrt(view.m[3] * view.m[3] + view.m[7] * view.m[7] + view.m[11] * view.m[11]);
+                for (int i = 0; i < 3; i++)
+                {
+                    for (int j = 0; j < 3; j++) view.m[i * 4 + j] = g_ref[i * 3 + j];
+                    view.m[i * 4 + 3] = i == 2 ? dist : 0;
+                    g_steadyPos[i] = (float)(-dist * g_ref[6 + i]);
+                    g_steadyDir[i] = (float)g_ref[6 + i];
+                    g_steadyRight[i] = (float)g_ref[i];
+                    g_steadyUp[i] = (float)g_ref[3 + i];
+                }
+                g_steadyRight[3] = g_steadyUp[3] = 0;
+                g_steadyPos[3] = 1;
+                g_steadyDir[3] = 0;
+            }
             // Sit closer to the point the camera looks at: the level's centre, when the
             // world origin is in front of the camera and near its axis.
             double depth = view.m[11];
@@ -194,6 +229,7 @@ void stereo::LoadSettings()
     g_hudSize = IniFloat("hud_size", 1.0f);
     g_hudOffsetY = IniFloat("hud_offset_y", 0.0f);
     g_nearMetres = IniFloat("near_metres", 0.1f);
+    g_steadyBackground = IniInt("steady_background", 1) != 0;
     g_dirty = true;
     Log("stereo: world_scale %g scene_zoom %g menu_scale %g hud_distance %g hud_size %g",
         g_worldScale, g_sceneZoom, g_menuScale, g_hudDistance, g_hudSize);
@@ -204,6 +240,8 @@ void stereo::Recentre() { g_recentre = true; }
 void stereo::SetEyes(const Eye eyes[2], bool tracked)
 {
     g_dirty = true;
+    g_frame++;
+    if (g_frame - g_lastLevelFrame > 1) g_steadyValid = false;
     if (!tracked)
     {
         g_eyes[0] = eyes[0];
@@ -248,9 +286,19 @@ void stereo::SetGameMatrix(const float* rows)
 
 bool stereo::HaveMatrix() { return g_have; }
 
-const float* stereo::EyeMatrix(int eye, bool overlay)
+bool stereo::SteadyCamera(SteadyValues* out)
 {
-    if (overlay != g_overlay) { g_overlay = overlay; g_dirty = true; }
+    if (!g_steadyValid) return false;
+    out->position = g_steadyPos;
+    out->direction = g_steadyDir;
+    out->right = g_steadyRight;
+    out->up = g_steadyUp;
+    return true;
+}
+
+const float* stereo::EyeMatrix(int eye, bool overlay, bool backdrop)
+{
+    if (overlay != g_overlay || backdrop != g_steady) { g_overlay = overlay; g_steady = backdrop; g_dirty = true; }
     if (g_dirty) Compute();
     return g_out[eye];
 }

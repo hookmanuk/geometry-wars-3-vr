@@ -19,5 +19,17 @@ namespace stereo
 
     // The replacement for c0-c3 for one eye (0 left, 1 right). "overlay" is true for draws made
     // after post-processing, straight to the frame: the HUD and menu panels.
-    const float* EyeMatrix(int eye, bool overlay);
+    // "backdrop" is true for the shaders that draw the scenery behind a level.
+    const float* EyeMatrix(int eye, bool overlay, bool backdrop);
+
+    // After EyeMatrix for a backdrop draw: the camera values that match the steady view, for
+    // the constants the game feeds its backdrop shaders. False when the steady view is not in use.
+    struct SteadyValues
+    {
+        const float* position;  // c4 viewPosition
+        const float* direction; // c5 viewDirection
+        const float* right;     // c7 backgroundParameters1: the axis sprites are widened along
+        const float* up;        // c8 backgroundParameters2
+    };
+    bool SteadyCamera(SteadyValues* out);
 }

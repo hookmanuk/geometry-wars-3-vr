@@ -13,7 +13,11 @@ static int g_dumpIndex;
 static unsigned g_frame;
 static unsigned g_draws;
 
-struct ShaderInfo { uint32_t hash; int index; bool usesViewProj; };
+struct ShaderInfo { uint32_t hash; int index; bool usesViewProj; bool backdrop; bool sprites; };
+
+// The vertex shaders that draw the scenery behind levels and menus: glow, bokeh discs, line
+// webs and streamers.
+static const uint32_t kBackdropShaders[] = { 0xad044890, 0x590e2dee, 0x1631024d, 0x3d07851d, 0x3571a687, 0xc2dcfe36 };
 static std::unordered_map<void*, ShaderInfo> g_shaders;
 static int g_shaderCount;
 
@@ -43,7 +47,12 @@ static void RegisterShader(void* shader, const DWORD* code, const char* kind)
     bool vp = false;
     for (size_t i = 0; i + 19 <= n * 4; i++)
         if (!memcmp((const char*)code + i, "worldViewProjection", 19)) { vp = true; break; }
-    ShaderInfo info{ h, g_shaderCount++, vp };
+    ShaderInfo info{ h, g_shaderCount++, vp, false, false };
+    // Backdrop shaders that build camera-facing sprites take the camera's right and up axes.
+    for (size_t i = 0; i + 21 <= n * 4; i++)
+        if (!memcmp((const char*)code + i, "backgroundParameters1", 21)) { info.sprites = true; break; }
+    if (kind[0] == 'v')
+        for (uint32_t b : kBackdropShaders) if (b == h) info.backdrop = true;
     g_shaders[shader] = info;
     CreateDirectoryA((g_dir + "gw3vr_shaders").c_str(), nullptr);
     char name[64];
@@ -90,6 +99,9 @@ static int g_viewportState;                // 0 = g_viewport is set, 1 = an eye'
 static unsigned g_rtWidth;
 static bool g_rtFinal;                     // the bound target is the frame itself (g_final)
 static bool g_vsUsesViewProj;
+static bool g_vsBackdrop;
+static bool g_vsSprites;
+static float g_gameConst[16][4];           // what the game last wrote to c0-c15
 static uint32_t g_psHash;
 static const uint32_t kFinalPass = 0xa356001c; // colour offset and vignette, drawn to the backbuffer
 
@@ -241,12 +253,26 @@ template <typename F> static HRESULT Draw(F draw)
         return draw();
     }
     HRESULT hr = S_OK;
+    bool backdrop = g_vsBackdrop && !g_rtFinal;
+    bool steady = false;
     for (int eye = 0; eye < 2; eye++)
     {
         SetEyeViewport(eye);
-        o_SetVSConstF(g_dev, 0, stereo::EyeMatrix(eye, g_rtFinal), 4);
+        o_SetVSConstF(g_dev, 0, stereo::EyeMatrix(eye, g_rtFinal, backdrop), 4);
+        if (backdrop && eye == 0)
+        {
+            stereo::SteadyValues v;
+            steady = stereo::SteadyCamera(&v);
+            if (steady)
+            {
+                o_SetVSConstF(g_dev, 4, v.position, 1);
+                o_SetVSConstF(g_dev, 5, v.direction, 1);
+                if (g_vsSprites) { o_SetVSConstF(g_dev, 7, v.right, 1); o_SetVSConstF(g_dev, 8, v.up, 1); }
+            }
+        }
         hr = draw();
     }
+    if (steady) o_SetVSConstF(g_dev, 4, g_gameConst[4], 5); // c4-c8 back to the game's values
     return hr;
 }
 
@@ -586,6 +612,8 @@ static HRESULT __stdcall H_SetVertexShader(IDirect3DDevice9* d, IDirect3DVertexS
     D("SetVertexShader vs_%08x", ShaderHash(s));
     auto it = g_shaders.find(s);
     g_vsUsesViewProj = it != g_shaders.end() && it->second.usesViewProj;
+    g_vsBackdrop = it != g_shaders.end() && it->second.backdrop;
+    g_vsSprites = it != g_shaders.end() && it->second.sprites;
     return o_SetVertexShader(d, s);
 }
 
@@ -608,6 +636,7 @@ static HRESULT __stdcall H_SetVSConstF(IDirect3DDevice9* d, UINT reg, const floa
 {
     DumpConsts("VSConst", reg, f, count);
     if (reg == 0 && count >= 4) stereo::SetGameMatrix(f);
+    if (reg < 16) memcpy(g_gameConst[reg], f, (reg + count > 16 ? 16 - reg : count) * 16);
     return o_SetVSConstF(d, reg, f, count);
 }
 
