@@ -287,11 +287,17 @@ namespace
             memcpy(g_levelGame, g_game, sizeof g_levelGame);
             memcpy(g_levelEye, g_out, sizeof g_levelEye);
             g_levelSeen = g_frame;
-            // The seat (the seated space's origin, the resting head) in world units, and the HUD
-            // distance in world units, for placing things at HUD depth in a given direction.
+            // The head (between the eyes, this frame) in world units, and the HUD distance in
+            // world units, for placing things at HUD depth in the direction the player sees them.
             Mat seatToWorld;
             if (Invert(seated, seatToWorld))
-                for (int i = 0; i < 3; i++) g_levelSeat[i] = (float)seatToWorld.m[i * 4 + 3];
+            {
+                double head[3];
+                for (int k = 0; k < 3; k++) head[k] = (g_eyes[0].pos[k] + g_eyes[1].pos[k]) * 0.5;
+                for (int i = 0; i < 3; i++)
+                    g_levelSeat[i] = (float)(seatToWorld.m[i * 4 + 0] * head[0] + seatToWorld.m[i * 4 + 1] * head[1] +
+                                             seatToWorld.m[i * 4 + 2] * head[2] + seatToWorld.m[i * 4 + 3]);
+            }
             g_levelSeat[3] = (float)(g_hudDistance / cz);
         }
     }
