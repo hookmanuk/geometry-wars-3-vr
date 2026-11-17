@@ -484,7 +484,8 @@ O main(I i)
     // One depth for the whole piece of text, found along the ray through its centre (c16), so
     // its letters stay flat and whole. Every ray from the camera crosses the near and far planes,
     // so the same fraction t along each ray is the same distance in front of the camera.
-    float2 centre = Ndc(float4(anchor.xy, 0, 1));
+    // Without a usable centre (anchor.w = 0), each vertex uses its own ray.
+    float2 centre = anchor.w > 0.5 ? Ndc(float4(anchor.xy, 0, 1)) : hud.xy / hud.w;
     float3 a = Unproject(centre, 0);
     float3 dir = Unproject(centre, 1) - a;
     // Enemies are on the near side of the level: a hit beyond the level's centre is the backdrop.
@@ -595,15 +596,24 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
     float inv[16], eyes[2][16];
     if (!stereo::LevelCamera(inv, eyes)) return false;
     if (!CopyEyeDepth()) return false;
-    // The centre of the text, from its vertices (a few dozen, read back once).
-    float anchor[4] = { 320, 180, 0, 1 };
+    // The centre of the text, from its vertices (a few dozen, read back once). Only from a
+    // buffer that can be read back, and only if it is a sensible place on the 640x360 canvas;
+    // otherwise anchor.w = 0 and each vertex finds its depth along its own ray instead.
+    float anchor[4] = { 320, 180, 0, 0 };
+    static unsigned anchored, writeOnly, rejected;
     {
         IDirect3DVertexBuffer9* vb = nullptr;
         UINT offset = 0, stride = 0;
         void* data = nullptr;
         if (SUCCEEDED(g_dev->GetStreamSource(0, &vb, &offset, &stride)) && vb)
         {
-            if (stride >= 8 && g_drawNumV && SUCCEEDED(vb->Lock(offset + (g_drawBase + g_drawMinV) * stride, g_drawNumV * stride, &data, D3DLOCK_READONLY)) && data)
+            D3DVERTEXBUFFER_DESC desc{};
+            vb->GetDesc(&desc);
+            if (desc.Usage & D3DUSAGE_WRITEONLY)
+            {
+                if (++writeOnly == 1) Log("score text: vertex buffer is write-only; depth per vertex");
+            }
+            else if (stride >= 8 && g_drawNumV && SUCCEEDED(vb->Lock(offset + (g_drawBase + g_drawMinV) * stride, g_drawNumV * stride, &data, D3DLOCK_READONLY)) && data)
             {
                 float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
                 for (UINT i = 0; i < g_drawNumV; i++)
@@ -611,9 +621,18 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
                     const float* f = (const float*)((const char*)data + i * stride);
                     for (int k = 0; k < 2; k++) { lo[k] = f[k] < lo[k] ? f[k] : lo[k]; hi[k] = f[k] > hi[k] ? f[k] : hi[k]; }
                 }
-                anchor[0] = (lo[0] + hi[0]) * 0.5f;
-                anchor[1] = (lo[1] + hi[1]) * 0.5f;
                 vb->Unlock();
+                bool sane = lo[0] > -200 && hi[0] < 840 && lo[1] > -200 && hi[1] < 560 && hi[0] - lo[0] < 640 && hi[1] - lo[1] < 360;
+                if (sane)
+                {
+                    anchor[0] = (lo[0] + hi[0]) * 0.5f;
+                    anchor[1] = (lo[1] + hi[1]) * 0.5f;
+                    anchor[3] = 1;
+                    anchored++;
+                }
+                else if (++rejected <= 10 || rejected % 100 == 0)
+                    Log("score text: read-back vertices not on the canvas (x %g..%g y %g..%g), %u times, %u good; depth per vertex",
+                        lo[0], hi[0], lo[1], hi[1], rejected, anchored);
             }
             vb->Release();
         }
