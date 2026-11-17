@@ -673,8 +673,11 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
 // (re-read whenever the file is saved), to find which shader draws something on screen.
 static uint32_t g_skipVs[8];
 
+static void ReadImageSettings();
+
 static void ReadSkipList()
 {
+    ReadImageSettings();
     memset(g_skipVs, 0, sizeof g_skipVs);
     std::string list = IniString("skip_vs");
     int n = 0;
@@ -1142,6 +1145,34 @@ static HRESULT __stdcall H_SetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3
     return o_SetTexture(d, stage, t);
 }
 
+// anisotropy=N in gw3vr.ini: textures the game filters linearly are filtered anisotropically,
+// which keeps surfaces seen at an angle sharp. 0 leaves the game's filtering alone.
+static int g_anisotropy = 16;
+static float g_bloom = 1.0f;          // bloom=x: strength of the game's glow (1 = as designed)
+static const uint32_t kBloomBrightPass = 0x8d864ea0; // picks the bright parts: c4 = (threshold, strength)
+
+typedef HRESULT(__stdcall* SetSamplerState_t)(IDirect3DDevice9*, DWORD, D3DSAMPLERSTATETYPE, DWORD);
+static SetSamplerState_t o_SetSamplerState;
+
+static HRESULT __stdcall H_SetSamplerState(IDirect3DDevice9* d, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value)
+{
+    if (g_anisotropy > 1 && sampler < 16 && type == D3DSAMP_MINFILTER && value == D3DTEXF_LINEAR)
+    {
+        o_SetSamplerState(d, sampler, D3DSAMP_MAXANISOTROPY, (DWORD)g_anisotropy);
+        value = D3DTEXF_ANISOTROPIC;
+    }
+    return o_SetSamplerState(d, sampler, type, value);
+}
+
+static void ReadImageSettings()
+{
+    int aniso = IniInt("anisotropy", 16);
+    float bloom = IniFloat("bloom", 1.0f);
+    if (aniso != g_anisotropy || bloom != g_bloom) Log("image: anisotropy %d, bloom %g", aniso, bloom);
+    g_anisotropy = aniso < 0 ? 0 : aniso > 16 ? 16 : aniso;
+    g_bloom = bloom < 0 ? 0 : bloom;
+}
+
 static HRESULT __stdcall H_DrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT start, UINT count)
 {
     g_draws++;
@@ -1306,6 +1337,13 @@ static HRESULT __stdcall H_SetPSConstF(IDirect3DDevice9* d, UINT reg, const floa
 {
     DumpConsts("PSConst", reg, f, count);
     if (reg < 8) memcpy(g_gamePsConst[reg], f, (reg + count > 8 ? 8 - reg : count) * 16);
+    if (g_psHash == kBloomBrightPass && reg == 4 && count == 1 && g_bloom != 1.0f)
+    {
+        // The bloom's bright pass: (colour - threshold) * strength. Scaling the strength scales
+        // the whole glow; 0 removes it.
+        const float scaled[4] = { f[0], f[1] * g_bloom, f[2], f[3] };
+        return o_SetPSConstF(d, reg, scaled, count);
+    }
     if (g_vr && g_psHash == kFinalPass && reg == 4 && count == 1)
     {
         // The final pass darkens the corners of the screen around a point that would sit
@@ -1353,6 +1391,7 @@ void InstallDeviceHooks(IDirect3DDevice9* dev)
     HOOK(47, SetViewport);
     HOOK(57, SetRenderState);
     HOOK(65, SetTexture);
+    HOOK(69, SetSamplerState);
     HOOK(81, DrawPrimitive);
     HOOK(82, DrawIndexedPrimitive);
     HOOK(83, DrawPrimitiveUP);
