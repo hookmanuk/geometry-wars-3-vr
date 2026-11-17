@@ -371,17 +371,32 @@ bool stereo::HaveMatrix() { return g_have; }
 bool stereo::Reproject(int eye, float matrix[16], float depth[4])
 {
     if (!g_have) return false;
-    const float* out = EyeMatrix(eye, false, false);
+    // In a level, the sprites were projected with the level camera, whatever the game set last
+    // (on kill frames that is sometimes the HUD camera, for the score text). Outside levels, the
+    // last camera set is the one.
+    const float* src = g_game;
+    const float* out;
+    if (g_levelSeen && g_frame - g_levelSeen <= 1)
+    {
+        if (memcmp(g_game, g_levelGame, sizeof g_levelGame) && eye == 0)
+        {
+            static unsigned count;
+            if (++count <= 5 || count % 100 == 0) Log("reproject: the last camera set was not the level's (%u times); using the level's", count);
+        }
+        src = g_levelGame;
+        out = g_levelEye[eye];
+    }
+    else out = EyeMatrix(eye, false, false);
     Mat game, inverse, eyeMatrix;
-    for (int i = 0; i < 16; i++) { game.m[i] = g_game[i]; eyeMatrix.m[i] = out[i]; }
+    for (int i = 0; i < 16; i++) { game.m[i] = src[i]; eyeMatrix.m[i] = out[i]; }
     if (!Invert(game, inverse)) return false;
     Mat m = Mul(eyeMatrix, inverse);
     for (int i = 0; i < 16; i++) matrix[i] = (float)m.m[i];
     // clip z = a * w + b in the game's projection (see Compute).
-    double wl2 = g_game[12] * g_game[12] + g_game[13] * g_game[13] + g_game[14] * g_game[14];
+    double wl2 = src[12] * src[12] + src[13] * src[13] + src[14] * src[14];
     if (wl2 < 1e-12) return false;
-    double a = (g_game[8] * g_game[12] + g_game[9] * g_game[13] + g_game[10] * g_game[14]) / wl2;
-    double b = g_game[11] - a * g_game[15];
+    double a = (src[8] * src[12] + src[9] * src[13] + src[10] * src[14]) / wl2;
+    double b = src[11] - a * src[15];
     depth[0] = (float)a;
     depth[1] = (float)b;
     depth[2] = depth[3] = 0;
