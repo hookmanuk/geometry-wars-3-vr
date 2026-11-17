@@ -137,7 +137,7 @@ O main(I i)
 )";
 static bool g_vsBackdrop;
 static bool g_vsSprites;
-static float g_gameConst[17][4];           // what the game last wrote to c0-c16
+static float g_gameConst[18][4];           // what the game last wrote to c0-c17
 static INT g_drawBase;                     // the vertex range of the indexed draw being made
 static UINT g_drawMinV, g_drawNumV;
 static uint32_t g_psHash;
@@ -451,6 +451,7 @@ float4 h0 : register(c4); float4 h1 : register(c5); float4 h2 : register(c6); fl
 float4 i0 : register(c8); float4 i1 : register(c9); float4 i2 : register(c10); float4 i3 : register(c11);
 float4 l0 : register(c12); float4 l1 : register(c13); float4 l2 : register(c14); float4 l3 : register(c15);
 float4 anchor : register(c16); // the centre of the text being drawn, in the HUD camera's coordinates
+float4 seat : register(c17);   // the resting head in the world; w = HUD distance in world units
 sampler2D depth : register(s0);
 struct I { float4 pos : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; float4 t2 : TEXCOORD2; };
 struct O { float4 pos : POSITION; float2 t0 : TEXCOORD0; float2 t1 : TEXCOORD1; float4 t2 : TEXCOORD2; float4 t3 : TEXCOORD3; };
@@ -507,10 +508,18 @@ O main(I i)
         }
         t = hi;
     }
+    // Never at or behind the seat (the game's camera sits further back than the player).
+    float tSeat = dot(seat.xyz - a, dir) / dot(dir, dir);
+    t = max(t, tSeat + 0.25 * max(limit - tSeat, 0));
     float2 ndc = hud.xy / hud.w;
     float3 va = Unproject(ndc, 0);
     float3 hit = va + (Unproject(ndc, 1) - va) * t;
-    float4 w = float4(hit, 1);
+    // Shown at HUD distance, in the direction of that point as seen from the seat: over the
+    // kill, at the depth of the rest of the HUD. One scale for the whole text keeps its shape.
+    float3 centreHit = a + dir * t;
+    float k = seat.w / max(length(centreHit - seat.xyz), 1);
+    float3 placed = seat.xyz + (hit - seat.xyz) * k;
+    float4 w = float4(placed, 1);
     o.pos = float4(dot(e0, w), dot(e1, w), dot(e2, w), dot(e3, w));
     o.t0 = hud.zw;
     o.t1 = i.t0.xy;
@@ -593,8 +602,8 @@ static bool CopyEyeDepth()
 template <typename F> static bool DrawScore(F draw, HRESULT* result)
 {
     if (!g_vsScore) return false;
-    float inv[16], eyes[2][16];
-    if (!stereo::LevelCamera(inv, eyes)) return false;
+    float inv[16], eyes[2][16], seat[4];
+    if (!stereo::LevelCamera(inv, eyes, seat)) return false;
     if (!CopyEyeDepth()) return false;
     // The centre of the text, from its vertices (a few dozen, read back once). Only from a
     // buffer that can be read back, and only if it is a sensible place on the 640x360 canvas;
@@ -639,6 +648,7 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
     }
     o_SetVertexShader(g_dev, g_vsScore);
     o_SetVSConstF(g_dev, 16, anchor, 1);
+    o_SetVSConstF(g_dev, 17, seat, 1);
     o_SetVSConstF(g_dev, 4, g_gameConst[0], 4); // the HUD camera the game set for this draw
     o_SetVSConstF(g_dev, 8, inv, 4);
     o_SetVSConstF(g_dev, 12, eyes[0], 4);
@@ -655,7 +665,7 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
     }
     o_SetTexture(g_dev, D3DVERTEXTEXTURESAMPLER0, nullptr);
     o_SetVertexShader(g_dev, g_vsCurrent);
-    o_SetVSConstF(g_dev, 0, g_gameConst[0], 17);
+    o_SetVSConstF(g_dev, 0, g_gameConst[0], 18);
     return true;
 }
 
@@ -1288,7 +1298,7 @@ static HRESULT __stdcall H_SetVSConstF(IDirect3DDevice9* d, UINT reg, const floa
             for (UINT i = 0; i < count * 4; i++) { uint32_t u; memcpy(&u, &f[i], 4); g_worldHash = (g_worldHash ^ u) * 16777619u; }
         if (reg == 4 && !g_camSeen && fabsf(f[0]) + fabsf(f[1]) + fabsf(f[2]) > 1) { g_row.camX = f[0]; g_row.camY = f[1]; g_row.camZ = f[2]; g_camSeen = true; }
     }
-    if (reg < 17) memcpy(g_gameConst[reg], f, (reg + count > 17 ? 17 - reg : count) * 16);
+    if (reg < 18) memcpy(g_gameConst[reg], f, (reg + count > 18 ? 18 - reg : count) * 16);
     return o_SetVSConstF(d, reg, f, count);
 }
 

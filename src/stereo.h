@@ -32,8 +32,9 @@ namespace stereo
     bool Reproject(int eye, float matrix[16], float depth[4]);
 
     // The level camera of this frame: the inverse of the game's matrix (game clip space to the
-    // world) and each eye's matrix (world to that eye's clip space). False outside levels.
-    bool LevelCamera(float inverseGame[16], float eyes[2][16]);
+    // world), each eye's matrix (world to that eye's clip space), and the seat (the resting
+    // head) in the world with the HUD distance in world units as w. False outside levels.
+    bool LevelCamera(float inverseGame[16], float eyes[2][16], float seat[4]);
 
     // For full-screen effects measured from the middle of the screen: where straight ahead from
     // the seat lands in one eye's image (u, v in 0..1), and how many of the game's screen

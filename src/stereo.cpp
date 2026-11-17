@@ -110,6 +110,7 @@ namespace
     bool g_lastSceneLevel; // the last scene camera was the level's (not the menu world's)
     // The level camera as last used for the level itself: the game's matrix and each eye's.
     float g_levelGame[16], g_levelEye[2][16];
+    float g_levelSeat[4];   // xyz: the seat in the world; w: HUD distance in world units
     unsigned g_levelSeen;
     bool g_loggedOrtho;
 
@@ -286,11 +287,17 @@ namespace
             memcpy(g_levelGame, g_game, sizeof g_levelGame);
             memcpy(g_levelEye, g_out, sizeof g_levelEye);
             g_levelSeen = g_frame;
+            // The seat (the seated space's origin, the resting head) in world units, and the HUD
+            // distance in world units, for placing things at HUD depth in a given direction.
+            Mat seatToWorld;
+            if (Invert(seated, seatToWorld))
+                for (int i = 0; i < 3; i++) g_levelSeat[i] = (float)seatToWorld.m[i * 4 + 3];
+            g_levelSeat[3] = (float)(g_hudDistance / cz);
         }
     }
 }
 
-bool stereo::LevelCamera(float inverseGame[16], float eyes[2][16])
+bool stereo::LevelCamera(float inverseGame[16], float eyes[2][16], float seat[4])
 {
     if (!g_levelSeen || g_frame - g_levelSeen > 1) return false;
     Mat game, inv;
@@ -298,6 +305,7 @@ bool stereo::LevelCamera(float inverseGame[16], float eyes[2][16])
     if (!Invert(game, inv)) return false;
     for (int i = 0; i < 16; i++) inverseGame[i] = (float)inv.m[i];
     memcpy(eyes, g_levelEye, sizeof g_levelEye);
+    memcpy(seat, g_levelSeat, sizeof g_levelSeat);
     return true;
 }
 
