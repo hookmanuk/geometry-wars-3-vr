@@ -1139,9 +1139,164 @@ static HRESULT __stdcall H_SetRenderState(IDirect3DDevice9* d, D3DRENDERSTATETYP
     return o_SetRenderState(d, s, v);
 }
 
+typedef HRESULT(__stdcall* SetSamplerState_t)(IDirect3DDevice9*, DWORD, D3DSAMPLERSTATETYPE, DWORD);
+static SetSamplerState_t o_SetSamplerState;
+
+// ---- sharper floor grid ----
+// The floor grid's line texture is 256x256 with no mipmaps, made for a 1080p screen. At headset
+// resolution each texel spans many pixels, and bilinear magnification smears the lines. With
+// grid_upscale=N (default 8) the texture is redrawn once at N times the size through a bicubic
+// filter, given mipmaps, and used in its place. 0 uses the game's texture.
+static const uint32_t kGridShader = 0x77300f40;
+static int g_gridUpscale = 8;
+static std::unordered_map<void*, IDirect3DTexture9*> g_upscaled;
+static IDirect3DPixelShader9* g_psUpscale;
+static IDirect3DStateBlock9* g_upscaleState;
+
+static const char* kUpscaleShader = R"(
+sampler2D src : register(s0);
+float4 p : register(c0); // x = source size in texels
+float4 Weights(float t)   // Catmull-Rom
+{
+    float t2 = t * t, t3 = t2 * t;
+    return float4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1, -1.5 * t3 + 2 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+}
+float4 main(float2 uv : TEXCOORD0) : COLOR
+{
+    float n = p.x;
+    float2 pos = uv * n - 0.5;
+    float2 f = frac(pos);
+    float2 base = floor(pos);
+    float4 wx = Weights(f.x), wy = Weights(f.y);
+    float4 c = 0;
+    for (int j = 0; j < 4; j++)
+    {
+        float4 row = 0;
+        for (int i = 0; i < 4; i++)
+            row += tex2Dlod(src, float4((base + float2(i - 1, j - 1) + 0.5) / n, 0, 0)) * wx[i];
+        c += row * wy[j];
+    }
+    return saturate(c);
+}
+)";
+
+static void ClearUpscaled()
+{
+    for (auto& u : g_upscaled) if (u.second) u.second->Release();
+    g_upscaled.clear();
+}
+
+// Returns the sharper copy of a grid texture, making it the first time.
+static IDirect3DTexture9* Upscaled(IDirect3DTexture9* src)
+{
+    auto it = g_upscaled.find(src);
+    if (it != g_upscaled.end()) return it->second;
+    g_upscaled[src] = nullptr; // one try per texture
+    D3DSURFACE_DESC desc{};
+    src->GetLevelDesc(0, &desc);
+    if (desc.Width > 1024 || desc.Height > 1024) return nullptr;
+    if (!g_psUpscale)
+    {
+        ID3DBlob* code = nullptr; ID3DBlob* err = nullptr;
+        if (SUCCEEDED(D3DCompile(kUpscaleShader, strlen(kUpscaleShader), nullptr, nullptr, nullptr, "main", "ps_3_0", 0, 0, &code, &err)))
+        {
+            o_CreatePixelShader(g_dev, (const DWORD*)code->GetBufferPointer(), &g_psUpscale);
+            code->Release();
+        }
+        else { Log("grid upscale shader: %s", err ? (const char*)err->GetBufferPointer() : "compile failed"); return nullptr; }
+        g_dev->CreateStateBlock(D3DSBT_ALL, &g_upscaleState);
+    }
+    UINT w = desc.Width * g_gridUpscale, h = desc.Height * g_gridUpscale;
+    IDirect3DTexture9* dst = nullptr;
+    HRESULT hr = o_CreateTexture(g_dev, w, h, 0, D3DUSAGE_RENDERTARGET | D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &dst, nullptr);
+    if (FAILED(hr) || !dst || !g_upscaleState) { Log("grid upscale: texture %ux%u failed %#lx", w, h, hr); return nullptr; }
+    IDirect3DSurface9* dstSurf = nullptr;
+    dst->GetSurfaceLevel(0, &dstSurf);
+    IDirect3DSurface9* rt = nullptr; IDirect3DSurface9* ds = nullptr;
+    g_dev->GetRenderTarget(0, &rt);
+    g_dev->GetDepthStencilSurface(&ds);
+    g_upscaleState->Capture();
+    o_SetRenderTarget(g_dev, 0, dstSurf);
+    o_SetDepthStencil(g_dev, nullptr);
+    D3DVIEWPORT9 vp{ 0, 0, w, h, 0, 1 };
+    o_SetViewport(g_dev, &vp);
+    o_SetVertexShader(g_dev, nullptr);
+    o_SetPixelShader(g_dev, g_psUpscale);
+    float size[4] = { (float)desc.Width, (float)desc.Height, 0, 0 };
+    o_SetPSConstF(g_dev, 0, size, 1);
+    o_SetTexture(g_dev, 0, src);
+    o_SetSamplerState(g_dev, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    o_SetSamplerState(g_dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    o_SetSamplerState(g_dev, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    o_SetSamplerState(g_dev, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+    o_SetSamplerState(g_dev, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+    const DWORD off[][2] = { { D3DRS_ZENABLE, FALSE }, { D3DRS_ZWRITEENABLE, FALSE }, { D3DRS_ALPHABLENDENABLE, FALSE },
+        { D3DRS_ALPHATESTENABLE, FALSE }, { D3DRS_CULLMODE, D3DCULL_NONE }, { D3DRS_STENCILENABLE, FALSE },
+        { D3DRS_SCISSORTESTENABLE, FALSE }, { D3DRS_COLORWRITEENABLE, 0xf }, { D3DRS_SRGBWRITEENABLE, FALSE } };
+    for (auto& s : off) o_SetRenderState(g_dev, (D3DRENDERSTATETYPE)s[0], s[1]);
+    g_dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    float fw = (float)w, fh = (float)h;
+    struct V { float x, y, z, rhw, u, v; } q[4] = {
+        { -0.5f, -0.5f, 0, 1, 0, 0 }, { fw - 0.5f, -0.5f, 0, 1, 1, 0 },
+        { -0.5f, fh - 0.5f, 0, 1, 0, 1 }, { fw - 0.5f, fh - 0.5f, 0, 1, 1, 1 } };
+    hr = o_DrawPrimitiveUP(g_dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(V));
+    g_upscaleState->Apply();
+    o_SetRenderTarget(g_dev, 0, rt);
+    o_SetDepthStencil(g_dev, ds);
+    if (rt) rt->Release();
+    if (ds) ds->Release();
+    dstSurf->Release();
+    g_viewportState = 1;
+    dst->SetAutoGenFilterType(D3DTEXF_LINEAR);
+    dst->GenerateMipSubLevels();
+    g_upscaled[src] = dst;
+    Log("grid upscale: %ux%u -> %ux%u with mipmaps (%#lx)", desc.Width, desc.Height, w, h, hr);
+    return dst;
+}
+
 static HRESULT __stdcall H_SetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t)
 {
-    D("SetTexture %lu %p", stage, t);
+    if (g_gridUpscale > 1 && stage == 0 && g_psHash == kGridShader && t && t->GetType() == D3DRTYPE_TEXTURE)
+    {
+        IDirect3DTexture9* up = Upscaled((IDirect3DTexture9*)t);
+        if (up)
+        {
+            // The game never sets a mipmap filter; the copy has mipmaps, so use them.
+            o_SetSamplerState(d, stage, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+            return o_SetTexture(d, stage, up);
+        }
+    }
+    if (g_dump && t && t->GetType() == D3DRTYPE_TEXTURE)
+    {
+        D3DSURFACE_DESC desc{};
+        ((IDirect3DTexture9*)t)->GetLevelDesc(0, &desc);
+        D("SetTexture %lu %p %ux%u levels %lu fmt %d usage %#lx pool %d", stage, t, desc.Width, desc.Height, t->GetLevelCount(), desc.Format, desc.Usage, desc.Pool);
+        // dump_texture=<pointer as logged>: writes that texture's first level to gw3vr_tex.bmp.
+        char want[32], byShader[32];
+        sprintf(want, "%p", t);
+        sprintf(byShader, "ps_%08x", g_psHash);
+        std::string dumpTex = IniString("dump_texture");
+        if ((dumpTex == want || dumpTex == byShader) && desc.Format == D3DFMT_A8R8G8B8)
+        {
+            D3DLOCKED_RECT lr{};
+            if (SUCCEEDED(((IDirect3DTexture9*)t)->LockRect(0, &lr, nullptr, D3DLOCK_READONLY)))
+            {
+                FILE* f = fopen((g_dir + "gw3vr_tex.bmp").c_str(), "wb");
+                if (f)
+                {
+                    BITMAPFILEHEADER fh{}; BITMAPINFOHEADER ih{};
+                    fh.bfType = 0x4d42; fh.bfOffBits = sizeof fh + sizeof ih; fh.bfSize = fh.bfOffBits + desc.Width * desc.Height * 4;
+                    ih.biSize = sizeof ih; ih.biWidth = desc.Width; ih.biHeight = -(LONG)desc.Height; ih.biPlanes = 1; ih.biBitCount = 32;
+                    fwrite(&fh, sizeof fh, 1, f); fwrite(&ih, sizeof ih, 1, f);
+                    for (UINT y = 0; y < desc.Height; y++) fwrite((BYTE*)lr.pBits + y * lr.Pitch, 4, desc.Width, f);
+                    fclose(f);
+                }
+                ((IDirect3DTexture9*)t)->UnlockRect(0);
+                D("  texture written to gw3vr_tex.bmp");
+            }
+        }
+    }
+    else D("SetTexture %lu %p", stage, t);
     return o_SetTexture(d, stage, t);
 }
 
@@ -1151,11 +1306,9 @@ static int g_anisotropy = 16;
 static float g_bloom = 1.0f;          // bloom=x: strength of the game's glow (1 = as designed)
 static const uint32_t kBloomBrightPass = 0x8d864ea0; // picks the bright parts: c4 = (threshold, strength)
 
-typedef HRESULT(__stdcall* SetSamplerState_t)(IDirect3DDevice9*, DWORD, D3DSAMPLERSTATETYPE, DWORD);
-static SetSamplerState_t o_SetSamplerState;
-
 static HRESULT __stdcall H_SetSamplerState(IDirect3DDevice9* d, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value)
 {
+    D("SS %lu %d = %#lx", sampler, type, value);
     if (g_anisotropy > 1 && sampler < 16 && type == D3DSAMP_MINFILTER && value == D3DTEXF_LINEAR)
     {
         o_SetSamplerState(d, sampler, D3DSAMP_MAXANISOTROPY, (DWORD)g_anisotropy);
@@ -1168,7 +1321,10 @@ static void ReadImageSettings()
 {
     int aniso = IniInt("anisotropy", 16);
     float bloom = IniFloat("bloom", 1.0f);
-    if (aniso != g_anisotropy || bloom != g_bloom) Log("image: anisotropy %d, bloom %g", aniso, bloom);
+    int up = IniInt("grid_upscale", 8);
+    up = up < 2 ? 0 : up > 16 ? 16 : up;
+    if (up != g_gridUpscale) { ClearUpscaled(); g_gridUpscale = up; }
+    if (aniso != g_anisotropy || bloom != g_bloom) Log("image: anisotropy %d, bloom %g, grid_upscale %d", aniso, bloom, up);
     g_anisotropy = aniso < 0 ? 0 : aniso > 16 ? 16 : aniso;
     g_bloom = bloom < 0 ? 0 : bloom;
 }
