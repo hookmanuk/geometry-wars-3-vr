@@ -6,6 +6,8 @@
 #include "stereo.h"
 #include "test.h"
 #include <unordered_map>
+#include <algorithm>
+#include <d3dcompiler.h>
 
 static IDirect3DDevice9* g_dev;
 static FILE* g_dump;
@@ -99,11 +101,40 @@ static int g_viewportState;                // 0 = g_viewport is set, 1 = an eye'
 static unsigned g_rtWidth;
 static bool g_rtFinal;                     // the bound target is the frame itself (g_final)
 static bool g_vsUsesViewProj;
+static uint32_t g_vsHash;
+static const uint32_t kFullScreenQuad = 0x39041d6b;
+static const uint32_t kCpuProjected = 0xb8717a0e;  // sprites the game projects itself: position is x/w, y/w, z/w
+static IDirect3DVertexShader9* g_vsCurrent;
+static IDirect3DVertexShader9* g_vsReproject;
+
+// Replacement for kCpuProjected. The game's version outputs its input position as it is. This
+// one recovers the clip-space position (w from depth), and applies c0-c3, which take it to an
+// eye. A quad on the near plane is a full-screen one and is left where it is.
+static const char* kReprojectShader = R"(
+float4 r0 : register(c0); float4 r1 : register(c1); float4 r2 : register(c2); float4 r3 : register(c3);
+float4 depth : register(c4);
+struct I { float4 pos : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; };
+struct O { float4 pos : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; float t2 : TEXCOORD2; };
+O main(I i)
+{
+    O o;
+    float w = depth.y / (i.pos.z - depth.x);
+    float4 clip = float4(i.pos.xyz * w, w);
+    float4 moved = float4(dot(r0, clip), dot(r1, clip), dot(r2, clip), dot(r3, clip));
+    o.pos = i.pos.z > 0.01 ? moved : float4(i.pos.xyz, 1);
+    o.t0 = i.t0;
+    o.t1 = i.t1;
+    o.t2 = i.pos.w;
+    return o;
+}
+)";
 static bool g_vsBackdrop;
 static bool g_vsSprites;
 static float g_gameConst[16][4];           // what the game last wrote to c0-c15
 static uint32_t g_psHash;
 static const uint32_t kFinalPass = 0xa356001c; // colour offset and vignette, drawn to the backbuffer
+static const uint32_t kFocusBlur = 0x9545d86c; // behind pop-ups: sharp in the middle of the screen, blurred outside
+static float g_gamePsConst[8][4];              // what the game last wrote to pixel constants c0-c7
 
 // ---- originals ----
 typedef HRESULT(__stdcall* Present_t)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
@@ -155,6 +186,38 @@ static SetShaderConstF_t o_SetVSConstF;
 static CreatePixelShader_t o_CreatePixelShader;
 static SetPixelShader_t o_SetPixelShader;
 static SetShaderConstF_t o_SetPSConstF;
+
+// Frame cost: the time from the headset handing over a frame slot to the GPU finishing the
+// game's drawing. It is what must fit in a refresh interval, whatever rate the runtime paces at.
+static LARGE_INTEGER g_workStart;
+static float g_work[600];
+static unsigned g_workCount;
+static LARGE_INTEGER g_statStart;
+
+static double Seconds(LARGE_INTEGER a, LARGE_INTEGER b)
+{
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return (double)(b.QuadPart - a.QuadPart) / f.QuadPart;
+}
+
+static void RecordFrameCost()
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (!g_workStart.QuadPart) { g_statStart = now; return; }
+    g_work[g_workCount++] = (float)(Seconds(g_workStart, now) * 1000.0);
+    if (g_workCount < 600) return;
+    g_workCount = 0;
+    float sorted[600];
+    memcpy(sorted, g_work, sizeof sorted);
+    std::sort(sorted, sorted + 600);
+    double sum = 0;
+    for (float v : sorted) sum += v;
+    Log("VR: %.1f FPS; frame cost avg %.2f ms, worst 1%% %.2f ms, max %.2f ms (600 frames)",
+        600.0 / Seconds(g_statStart, now), sum / 600, sorted[593], sorted[599]);
+    g_statStart = now;
+}
 
 // Where the render thread is, for the stall report below.
 static const char* volatile g_stage = "game";
@@ -238,6 +301,32 @@ static void SetEyeViewport(int eye)
     g_viewportState = 1;
 }
 
+std::unordered_map<uint32_t, int> g_unhandledSeen;
+static char g_drawNote[256];
+static INT g_noteBase;
+static UINT g_noteMinV, g_noteNumV;
+
+// Appends the first vertices of the indexed draw being made to g_drawNote (diagnostics only).
+static void NoteVertices()
+{
+    IDirect3DVertexBuffer9* vb = nullptr;
+    UINT offset = 0, stride = 0;
+    void* data = nullptr;
+    if (FAILED(g_dev->GetStreamSource(0, &vb, &offset, &stride)) || !vb) return;
+    if (stride >= 16 && g_noteNumV && SUCCEEDED(vb->Lock(offset + (g_noteBase + g_noteMinV) * stride, g_noteNumV * stride, &data, D3DLOCK_READONLY)) && data)
+    {
+        size_t at = strlen(g_drawNote);
+        at += sprintf(g_drawNote + at, " stride %u", stride);
+        for (UINT i = 0; i < g_noteNumV && i < 4 && at < sizeof g_drawNote - 60; i++)
+        {
+            const float* f = (const float*)((const char*)data + i * stride);
+            at += sprintf(g_drawNote + at, " [%.3g %.3g %.3g %.3g]", f[0], f[1], f[2], f[3]);
+        }
+        vb->Unlock();
+    }
+    vb->Release();
+}
+
 // True when the next draw goes to both eyes with its own matrix for each.
 static bool StereoDraw()
 {
@@ -247,9 +336,69 @@ static bool StereoDraw()
 // Runs a draw once per eye, or once unchanged.
 template <typename F> static HRESULT Draw(F draw)
 {
+    if (g_vr && g_rtStereo && !g_rtFinal && g_vsHash == kCpuProjected && g_vsReproject)
+    {
+        float m[2][16], depth[4];
+        if (stereo::Reproject(0, m[0], depth) && stereo::Reproject(1, m[1], depth))
+        {
+            o_SetVertexShader(g_dev, g_vsReproject);
+            o_SetVSConstF(g_dev, 4, depth, 1);
+            HRESULT hr = S_OK;
+            for (int eye = 0; eye < 2; eye++)
+            {
+                SetEyeViewport(eye);
+                o_SetVSConstF(g_dev, 0, m[eye], 4);
+                hr = draw();
+            }
+            o_SetVertexShader(g_dev, g_vsCurrent);
+            o_SetVSConstF(g_dev, 4, g_gameConst[4], 1);
+            return hr;
+        }
+    }
     if (!StereoDraw())
     {
+        // A shader that places its vertices itself, drawn into the eyes, is either a full-screen
+        // pass (fine: it covers both eyes) or something that needs handling. Name each once.
+        if (g_vr && g_rtStereo && !g_vsUsesViewProj && g_vsHash && g_vsHash != kFullScreenQuad)
+        {
+            extern std::unordered_map<uint32_t, int> g_unhandledSeen;
+            auto& seen = g_unhandledSeen;
+            if (seen[g_vsHash] < 8) NoteVertices();
+            if (seen[g_vsHash]++ < 8) Log("unhandled: vs_%08x ps_%08x draws into the eyes without the game's matrix, frame %u: %s", g_vsHash, g_psHash, g_frame, g_drawNote);
+        }
         EnsureViewport();
+        if (g_vr && g_rtStereo && g_psHash == kFocusBlur)
+        {
+            // The pass measures distance from a point given in c5 (scaled by c6.zw) across the
+            // whole image. Drawn once per eye, clipped to that eye's half, with the point and
+            // the horizontal scale restated for the half.
+            DWORD scissor = FALSE;
+            g_dev->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor);
+            o_SetRenderState(g_dev, D3DRS_SCISSORTESTENABLE, TRUE);
+            HRESULT hr = S_OK;
+            for (int eye = 0; eye < 2; eye++)
+            {
+                RECT half{ (LONG)(eye * g_rtWidth / 2), 0, (LONG)((eye + 1) * g_rtWidth / 2), (LONG)g_viewport.Height };
+                g_dev->SetScissorRect(&half);
+                float c5[4], c6[4];
+                memcpy(c5, g_gamePsConst[5], sizeof c5);
+                memcpy(c6, g_gamePsConst[6], sizeof c6);
+                // The game's point is relative to the middle of its screen; here that middle
+                // is straight ahead of the seat, and the eye's image spans several screens.
+                float u, v, su, sv;
+                stereo::ScreenCentre(eye, &u, &v, &su, &sv);
+                c5[0] = (u + (c5[0] - 0.5f) / su + eye) * 0.5f;
+                c5[1] = v + (c5[1] - 0.5f) / sv;
+                c6[2] *= 2.0f * su;
+                c6[3] *= sv;
+                o_SetPSConstF(g_dev, 5, c5, 1);
+                o_SetPSConstF(g_dev, 6, c6, 1);
+                hr = draw();
+            }
+            o_SetPSConstF(g_dev, 5, g_gamePsConst[5], 2);
+            o_SetRenderState(g_dev, D3DRS_SCISSORTESTENABLE, scissor);
+            return hr;
+        }
         return draw();
     }
     HRESULT hr = S_OK;
@@ -349,6 +498,7 @@ static void VrFrame()
     EnsureViewport();
     g_stage = "waiting for the GPU to finish D3D9 work";
     FlushD3D9();
+    RecordFrameCost();
     g_stage = "screenshot";
     test::Screenshot(g_dev, g_finalSurf);
     g_stage = "submitting the eyes (xrEndFrame)";
@@ -369,6 +519,7 @@ static void VrNextFrame()
     Eye eyes[2];
     g_stage = "waiting for the headset's next frame (xrWaitFrame)";
     bool tracked = vr::BeginFrame(eyes);
+    QueryPerformanceCounter(&g_workStart);
     g_stage = "game";
     if (test::RecentreRequested()) stereo::Recentre();
     if (test::SettingsChanged()) stereo::LoadSettings();
@@ -565,6 +716,7 @@ static HRESULT __stdcall H_DrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t
 {
     g_draws++;
     D("DrawPrimitive type %d start %u prims %u", t, start, count);
+    if (!g_vsUsesViewProj) { sprintf(g_drawNote, "type %d start %u prims %u", t, start, count); g_noteNumV = 0; }
     return Draw([&] { return o_DrawPrimitive(d, t, start, count); });
 }
 
@@ -572,6 +724,32 @@ static HRESULT __stdcall H_DrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIV
 {
     g_draws++;
     D("DrawIndexedPrimitive type %d base %d verts %u start %u prims %u", t, base, numV, start, count);
+    if (!g_vsUsesViewProj)
+    {
+        sprintf(g_drawNote, "indexed type %d verts %u prims %u", t, numV, count);
+        g_noteBase = base; g_noteMinV = minV; g_noteNumV = numV;
+    }
+    if (g_dump && !g_vsUsesViewProj)
+    {
+        // Frame dumps only: the vertices of draws that place themselves, read back from the buffer.
+        IDirect3DVertexBuffer9* vb = nullptr;
+        UINT offset = 0, stride = 0;
+        void* data = nullptr;
+        if (SUCCEEDED(d->GetStreamSource(0, &vb, &offset, &stride)) && vb)
+        {
+            if (stride >= 16 && SUCCEEDED(vb->Lock(offset + (base + minV) * stride, numV * stride, &data, D3DLOCK_READONLY)) && data)
+            {
+                for (UINT i = 0; i < numV && i < 8; i++)
+                {
+                    const float* f = (const float*)((const char*)data + i * stride);
+                    fprintf(g_dump, "  vertex %u: [%g %g %g %g] [%g %g %g %g]\n", i, f[0], f[1], f[2], f[3],
+                        stride >= 32 ? f[4] : 0.f, stride >= 32 ? f[5] : 0.f, stride >= 32 ? f[6] : 0.f, stride >= 32 ? f[7] : 0.f);
+                }
+                vb->Unlock();
+            }
+            vb->Release();
+        }
+    }
     return Draw([&] { return o_DrawIndexedPrimitive(d, t, base, minV, numV, start, count); });
 }
 
@@ -582,6 +760,14 @@ static HRESULT __stdcall H_DrawPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVETYPE
     {
         const float* f = (const float*)data;
         D("DrawPrimitiveUP type %d prims %u stride %u v0 [%g %g %g %g]", t, count, stride, f[0], f[1], f[2], stride >= 16 ? f[3] : 0.f);
+    }
+    if (!g_vsUsesViewProj && stride >= 16)
+    {
+        const float* f = (const float*)data;
+        const float* g = (const float*)((const char*)data + stride);
+        const float* h = (const float*)((const char*)data + 2 * stride);
+        sprintf(g_drawNote, "UP type %d prims %u stride %u [%g %g %g %g] [%g %g %g %g] [%g %g %g %g]", t, count, stride,
+            f[0], f[1], f[2], f[3], g[0], g[1], g[2], g[3], h[0], h[1], h[2], h[3]);
     }
     return Draw([&] { return o_DrawPrimitiveUP(d, t, count, data, stride); });
 }
@@ -610,10 +796,12 @@ static HRESULT __stdcall H_CreatePixelShader(IDirect3DDevice9* d, const DWORD* c
 static HRESULT __stdcall H_SetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* s)
 {
     D("SetVertexShader vs_%08x", ShaderHash(s));
+    g_vsCurrent = s;
     auto it = g_shaders.find(s);
     g_vsUsesViewProj = it != g_shaders.end() && it->second.usesViewProj;
     g_vsBackdrop = it != g_shaders.end() && it->second.backdrop;
     g_vsSprites = it != g_shaders.end() && it->second.sprites;
+    g_vsHash = it != g_shaders.end() ? it->second.hash : 0;
     return o_SetVertexShader(d, s);
 }
 
@@ -643,6 +831,7 @@ static HRESULT __stdcall H_SetVSConstF(IDirect3DDevice9* d, UINT reg, const floa
 static HRESULT __stdcall H_SetPSConstF(IDirect3DDevice9* d, UINT reg, const float* f, UINT count)
 {
     DumpConsts("PSConst", reg, f, count);
+    if (reg < 8) memcpy(g_gamePsConst[reg], f, (reg + count > 8 ? 8 - reg : count) * 16);
     if (g_vr && g_psHash == kFinalPass && reg == 4 && count == 1)
     {
         // The final pass darkens the corners of the screen around a point that would sit
@@ -707,6 +896,16 @@ void InstallDeviceHooks(IDirect3DDevice9* dev)
         ex->Release();
     }
 #undef HOOK
+    if (g_vr && !g_vsReproject)
+    {
+        ID3DBlob* code = nullptr; ID3DBlob* err = nullptr;
+        if (SUCCEEDED(D3DCompile(kReprojectShader, strlen(kReprojectShader), nullptr, nullptr, nullptr, "main", "vs_3_0", 0, 0, &code, &err)))
+        {
+            o_CreateVertexShader(dev, (const DWORD*)code->GetBufferPointer(), &g_vsReproject);
+            code->Release();
+        }
+        else Log("reprojection shader: %s", err ? (const char*)err->GetBufferPointer() : "compile failed");
+    }
     SetupDevice();
     test::PlaceWindow(dev);
     static bool watchdog;

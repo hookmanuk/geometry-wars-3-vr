@@ -47,8 +47,6 @@ namespace
     };
     EyeChain g_chains[2];
 
-    unsigned g_frames;
-    LARGE_INTEGER g_statStart;
 
     bool Check(XrResult r, const char* what)
     {
@@ -301,7 +299,6 @@ bool vr::Init()
     if (!Check(xrCreateReferenceSpace(g_session, &rsi, &g_space), "xrCreateReferenceSpace")) return false;
 
     if (!CreateSwapchains()) return false;
-    QueryPerformanceCounter(&g_statStart);
     g_active = true;
     return true;
 }
@@ -419,12 +416,4 @@ void vr::EndFrame(HANDLE sharedSbs)
     }
     Check(xrEndFrame(g_session, &ei), "xrEndFrame");
 
-    if (++g_frames % 600 == 0)
-    {
-        LARGE_INTEGER now, freq;
-        QueryPerformanceCounter(&now);
-        QueryPerformanceFrequency(&freq);
-        Log("VR: %.1f frames per second over the last 600", 600.0 * freq.QuadPart / (now.QuadPart - g_statStart.QuadPart));
-        g_statStart = now;
-    }
 }

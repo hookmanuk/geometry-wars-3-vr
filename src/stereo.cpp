@@ -42,6 +42,33 @@ namespace
 
     double Len3(const double* v) { return sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
 
+    // General 4x4 inverse by cofactors. False when the matrix is singular.
+    bool Invert(const Mat& in, Mat& out)
+    {
+        const double* m = in.m;
+        double inv[16];
+        inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+        inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+        inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+        inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+        inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+        inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+        inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+        inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+        inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+        inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+        inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+        inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+        inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+        inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+        inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+        inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+        double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+        if (fabs(det) < 1e-30) return false;
+        for (int i = 0; i < 16; i++) out.m[i] = inv[i] / det;
+        return true;
+    }
+
     // Settings (gw3vr.ini).
     double g_worldScale;    // level camera: game units per metre
     double g_sceneZoom;     // level camera: how many times closer the player sits than the game's camera
@@ -77,6 +104,8 @@ namespace
 
     // Projection scales of the last scene camera, used to lay the HUD over the same field of view.
     double g_sceneSx = 1.0, g_sceneSy = 1.8;
+    // Half-width and half-height of the game's own frame as the player sees it (tangents).
+    double g_frameTanX = 0.58, g_frameTanY = 0.33;
     bool g_loggedOrtho;
 
     // World-to-eye for one eye, from its pose in the seated space.
@@ -155,12 +184,16 @@ namespace
             cx = cy = cz = 1 / g_menuScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
+            g_frameTanX = 1 / sx;
+            g_frameTanY = 1 / sy;
         }
         else
         {
             cx = cy = cz = 1 / g_worldScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
+            g_frameTanX = g_sceneZoom / sx;
+            g_frameTanY = g_sceneZoom / sy;
             if (g_frame - g_lastLevelFrame > 1)
                 for (int i = 0; i < 3; i++)
                     for (int j = 0; j < 3; j++) g_ref[i * 3 + j] = view.m[i * 4 + j];
@@ -285,6 +318,41 @@ void stereo::SetGameMatrix(const float* rows)
 }
 
 bool stereo::HaveMatrix() { return g_have; }
+
+bool stereo::Reproject(int eye, float matrix[16], float depth[4])
+{
+    if (!g_have) return false;
+    const float* out = EyeMatrix(eye, false, false);
+    Mat game, inverse, eyeMatrix;
+    for (int i = 0; i < 16; i++) { game.m[i] = g_game[i]; eyeMatrix.m[i] = out[i]; }
+    if (!Invert(game, inverse)) return false;
+    Mat m = Mul(eyeMatrix, inverse);
+    for (int i = 0; i < 16; i++) matrix[i] = (float)m.m[i];
+    // clip z = a * w + b in the game's projection (see Compute).
+    double wl2 = g_game[12] * g_game[12] + g_game[13] * g_game[13] + g_game[14] * g_game[14];
+    if (wl2 < 1e-12) return false;
+    double a = (g_game[8] * g_game[12] + g_game[9] * g_game[13] + g_game[10] * g_game[14]) / wl2;
+    double b = g_game[11] - a * g_game[15];
+    depth[0] = (float)a;
+    depth[1] = (float)b;
+    depth[2] = depth[3] = 0;
+    return true;
+}
+
+void stereo::ScreenCentre(int eye, float* u, float* v, float* scaleU, float* scaleV)
+{
+    const Eye& e = g_eyes[eye];
+    // The seat's forward direction, in this eye's axes.
+    Mat view = EyeView(e);
+    double dx = -view.m[2], dy = -view.m[6], dz = -view.m[10];
+    double depth = -dz > 0.05 ? -dz : 0.05;
+    double ndcX = (2 * dx / depth - (e.tanR + e.tanL)) / (e.tanR - e.tanL);
+    double ndcY = (2 * dy / depth - (e.tanU + e.tanD)) / (e.tanU - e.tanD);
+    *u = (float)(0.5 + 0.5 * ndcX);
+    *v = (float)(0.5 - 0.5 * ndcY);
+    *scaleU = (float)((e.tanR - e.tanL) / (2 * g_frameTanX));
+    *scaleV = (float)((e.tanU - e.tanD) / (2 * g_frameTanY));
+}
 
 bool stereo::SteadyCamera(SteadyValues* out)
 {

@@ -22,6 +22,16 @@ namespace stereo
     // "backdrop" is true for the shaders that draw the scenery behind a level.
     const float* EyeMatrix(int eye, bool overlay, bool backdrop);
 
+    // For geometry the game projected itself, with the camera of the matrix it last set: the
+    // matrix taking the game's clip-space position to this eye's, and (a, b) of the game's
+    // depth mapping clip z = a * w + b, from which w is recovered. False when unavailable.
+    bool Reproject(int eye, float matrix[16], float depth[4]);
+
+    // For full-screen effects measured from the middle of the screen: where straight ahead from
+    // the seat lands in one eye's image (u, v in 0..1), and how many of the game's screen
+    // widths and heights that image spans.
+    void ScreenCentre(int eye, float* u, float* v, float* scaleU, float* scaleV);
+
     // After EyeMatrix for a backdrop draw: the camera values that match the steady view, for
     // the constants the game feeds its backdrop shaders. False when the steady view is not in use.
     struct SteadyValues
