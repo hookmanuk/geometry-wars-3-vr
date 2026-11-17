@@ -85,9 +85,17 @@ screenshots). No frame-rate patch is needed.
 - **Score numbers deep in the background.** They are drawn with the HUD text shader
   (`vs_fe5eb358`/`ps_12e27094`) and the HUD canvas camera, but in the scene pass, so they get
   bloom. That camera (near plane 1) was taken for the menu world and placed ~170 m away. An
-  unrotated camera with an offset, outside the final pass, is now the `popup` kind: placed at
-  `hud_distance`, spread by `scene_zoom` so a number stays over its kill. Checked by eye
-  disparity: the number and the HUD now shift identically between the eyes.
+  unrotated camera with an offset, outside the final pass, is now the `popup` kind.
+  First placed on the HUD panel; Matt found them landing too close to the ship (a flat panel
+  can only approximate the level's perspective). Now (`score_depth=level`, default) the eye
+  depth buffer is INTZ, the left eye's depth is copied to a quarter-size R32F texture at the
+  first number of a frame, and a replacement for `vs_fe5eb358` marches each vertex's ray from
+  the game's level camera through its screen position until it meets that depth (96 steps +
+  8 bisections, read with vertex texture fetch). At that point in the scene pass the depth
+  buffer holds only the backdrop and the level surface (`vs_a877f050`), so the hit is where
+  the enemy was. Checked by disparity: a "10" shifts between the eyes like the planet surface
+  under it (32 px vs 25 px for an enemy floating just above it), not like the HUD. 90.0 FPS
+  with a number drawn every frame, frame cost 2.4 ms. `score_depth=hud` keeps the panel.
 - PCGamingWiki notes the higher update rate slightly changes some enemy behaviour (seekers and
   chargers track a little faster; the Turret ability fires more; crashes with Turret on green
   walls at 300 Hz). At 90 Hz the effect should be small; not yet checked here.

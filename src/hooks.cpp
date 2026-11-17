@@ -420,8 +420,194 @@ static bool StereoDraw()
 }
 
 // Runs a draw once per eye, or once unchanged.
+// ---- kill score numbers ----
+// The game draws them with the HUD text shader and the HUD camera, inside the scene pass, at the
+// screen position of the enemy that died; nothing says how far away that enemy was. When they
+// are drawn, the depth buffer holds the level surface the enemies move on. So: the left eye's
+// depth is copied to a small float texture, and a replacement for the text shader follows each
+// vertex's ray from the game's camera through its screen position until it meets that surface,
+// and puts the vertex there. Each number then sits where its enemy was, at the enemy's depth.
+// score_depth=hud in gw3vr.ini places them on the HUD panel instead.
+static const uint32_t kHudText = 0xfe5eb358;
+static IDirect3DTexture9* g_depthTex;      // the eye depth buffer, readable (INTZ)
+static IDirect3DTexture9* g_depthCopy;     // left eye depth as R32F, quarter size
+static IDirect3DSurface9* g_depthCopySurf;
+static IDirect3DPixelShader9* g_psDepthCopy;
+static IDirect3DVertexShader9* g_vsScore;
+static IDirect3DStateBlock9* g_stateSave;
+static unsigned g_depthCopyFrame = ~0u;
+static int g_scoreDepth = -1;              // 1 = on the level, 0 = on the HUD panel
+
+static const char* kDepthCopyShader = R"(
+sampler2D depth : register(s0);
+float4 main(float2 uv : TEXCOORD0) : COLOR { return tex2D(depth, uv).rrrr; }
+)";
+
+static const char* kScoreShader = R"(
+float4 e0 : register(c0); float4 e1 : register(c1); float4 e2 : register(c2); float4 e3 : register(c3);
+float4 h0 : register(c4); float4 h1 : register(c5); float4 h2 : register(c6); float4 h3 : register(c7);
+float4 i0 : register(c8); float4 i1 : register(c9); float4 i2 : register(c10); float4 i3 : register(c11);
+float4 l0 : register(c12); float4 l1 : register(c13); float4 l2 : register(c14); float4 l3 : register(c15);
+sampler2D depth : register(s0);
+struct I { float4 pos : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; float4 t2 : TEXCOORD2; };
+struct O { float4 pos : POSITION; float2 t0 : TEXCOORD0; float2 t1 : TEXCOORD1; float4 t2 : TEXCOORD2; float4 t3 : TEXCOORD3; };
+float3 Unproject(float2 ndc, float z)
+{
+    float4 p = float4(ndc, z, 1);
+    float4 w = float4(dot(i0, p), dot(i1, p), dot(i2, p), dot(i3, p));
+    return w.xyz / w.w;
+}
+// True when the world point is behind the surface the left eye sees.
+bool Behind(float3 p)
+{
+    float4 c = float4(dot(l0, float4(p, 1)), dot(l1, float4(p, 1)), dot(l2, float4(p, 1)), dot(l3, float4(p, 1)));
+    if (c.w <= 0) return false;
+    float3 n = c.xyz / c.w;
+    if (abs(n.x) > 1 || abs(n.y) > 1) return false;
+    float d = tex2Dlod(depth, float4(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5, 0, 0)).r;
+    return d < 1 && n.z >= d;
+}
+O main(I i)
+{
+    O o;
+    float4 p = float4(i.pos.xyz, 1);
+    float4 hud = float4(dot(h0, p), dot(h1, p), dot(h2, p), dot(h3, p));
+    float2 ndc = hud.xy / hud.w;
+    float3 a = Unproject(ndc, 0);
+    float3 b = Unproject(ndc, 1);
+    // Default when the ray finds no surface: the point on the ray nearest the level's centre.
+    float3 dir = b - a;
+    float3 hit = a + dir * saturate(-dot(a, dir) / dot(dir, dir));
+    float lo = 0, hi = -1;
+    for (int s = 1; s <= 96; s++)
+    {
+        float t = s / 96.0;
+        if (Behind(a + dir * t)) { hi = t; lo = (s - 1) / 96.0; break; }
+    }
+    if (hi > 0)
+    {
+        for (int k = 0; k < 8; k++)
+        {
+            float m = (lo + hi) * 0.5;
+            if (Behind(a + dir * m)) hi = m; else lo = m;
+        }
+        hit = a + dir * hi;
+    }
+    float4 w = float4(hit, 1);
+    o.pos = float4(dot(e0, w), dot(e1, w), dot(e2, w), dot(e3, w));
+    o.t0 = hud.zw;
+    o.t1 = i.t0.xy;
+    o.t2 = i.t1;
+    o.t3 = i.t2;
+    return o;
+}
+)";
+
+static void CreateScoreResources()
+{
+    if (g_scoreDepth < 0) g_scoreDepth = IniString("score_depth") == "hud" ? 0 : 1;
+    if (!g_scoreDepth || !g_depthTex || g_vsScore) return;
+    ID3DBlob* code = nullptr; ID3DBlob* err = nullptr;
+    if (SUCCEEDED(D3DCompile(kScoreShader, strlen(kScoreShader), nullptr, nullptr, nullptr, "main", "vs_3_0", 0, 0, &code, &err)))
+    {
+        o_CreateVertexShader(g_dev, (const DWORD*)code->GetBufferPointer(), &g_vsScore);
+        code->Release();
+    }
+    else Log("score shader: %s", err ? (const char*)err->GetBufferPointer() : "compile failed");
+    if (SUCCEEDED(D3DCompile(kDepthCopyShader, strlen(kDepthCopyShader), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &code, &err)))
+    {
+        o_CreatePixelShader(g_dev, (const DWORD*)code->GetBufferPointer(), &g_psDepthCopy);
+        code->Release();
+    }
+    else Log("depth copy shader: %s", err ? (const char*)err->GetBufferPointer() : "compile failed");
+    HRESULT hr = o_CreateTexture(g_dev, vr::EyeWidth() / 4, vr::EyeHeight() / 4, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &g_depthCopy, nullptr);
+    if (g_depthCopy) g_depthCopy->GetSurfaceLevel(0, &g_depthCopySurf);
+    g_dev->CreateStateBlock(D3DSBT_ALL, &g_stateSave);
+    Log("score numbers on the level surface: %s (shader %p, copy %p %#lx)", g_vsScore && g_psDepthCopy && g_depthCopySurf ? "ready" : "unavailable", g_vsScore, g_depthCopy, hr);
+}
+
+// Copies the left eye's depth to g_depthCopy, once per frame, keeping all device state.
+static bool CopyEyeDepth()
+{
+    if (g_depthCopyFrame == g_frame) return true;
+    if (!g_depthCopySurf || !g_psDepthCopy || !g_stateSave) return false;
+    IDirect3DSurface9* rt = nullptr; IDirect3DSurface9* ds = nullptr;
+    g_dev->GetRenderTarget(0, &rt);
+    g_dev->GetDepthStencilSurface(&ds);
+    g_stateSave->Capture();
+    o_SetRenderTarget(g_dev, 0, g_depthCopySurf);
+    o_SetDepthStencil(g_dev, nullptr);
+    D3DSURFACE_DESC d{};
+    g_depthCopySurf->GetDesc(&d);
+    D3DVIEWPORT9 vp{ 0, 0, d.Width, d.Height, 0, 1 };
+    o_SetViewport(g_dev, &vp);
+    o_SetVertexShader(g_dev, nullptr);
+    o_SetPixelShader(g_dev, g_psDepthCopy);
+    o_SetTexture(g_dev, 0, g_depthTex);
+    g_dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    g_dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    g_dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    g_dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    g_dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    const DWORD off[][2] = { { D3DRS_ZENABLE, FALSE }, { D3DRS_ZWRITEENABLE, FALSE }, { D3DRS_ALPHABLENDENABLE, FALSE },
+        { D3DRS_ALPHATESTENABLE, FALSE }, { D3DRS_CULLMODE, D3DCULL_NONE }, { D3DRS_STENCILENABLE, FALSE },
+        { D3DRS_SCISSORTESTENABLE, FALSE }, { D3DRS_COLORWRITEENABLE, 0xf }, { D3DRS_SRGBWRITEENABLE, FALSE } };
+    for (auto& s : off) o_SetRenderState(g_dev, (D3DRENDERSTATETYPE)s[0], s[1]);
+    g_dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    // Left half of the side-by-side depth only.
+    float w = (float)d.Width, h = (float)d.Height;
+    struct V { float x, y, z, rhw, u, v; } q[4] = {
+        { -0.5f, -0.5f, 0, 1, 0, 0 }, { w - 0.5f, -0.5f, 0, 1, 0.5f, 0 },
+        { -0.5f, h - 0.5f, 0, 1, 0, 1 }, { w - 0.5f, h - 0.5f, 0, 1, 0.5f, 1 } };
+    HRESULT hr = o_DrawPrimitiveUP(g_dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(V));
+    g_stateSave->Apply();
+    o_SetRenderTarget(g_dev, 0, rt);
+    o_SetDepthStencil(g_dev, ds);
+    if (rt) rt->Release();
+    if (ds) ds->Release();
+    g_viewportState = 1; // the viewport is restored by the state block; make the next draw set it again
+    g_depthCopyFrame = g_frame;
+    static bool logged;
+    if (!logged) { logged = true; Log("score numbers: first depth copy %#lx", hr); }
+    return SUCCEEDED(hr);
+}
+
+// Draws one score number on the level surface, once per eye. False when it cannot be done here.
+template <typename F> static bool DrawScore(F draw, HRESULT* result)
+{
+    if (!g_vsScore) return false;
+    float inv[16], eyes[2][16];
+    if (!stereo::LevelCamera(inv, eyes)) return false;
+    if (!CopyEyeDepth()) return false;
+    o_SetVertexShader(g_dev, g_vsScore);
+    o_SetVSConstF(g_dev, 4, g_gameConst[0], 4); // the HUD camera the game set for this draw
+    o_SetVSConstF(g_dev, 8, inv, 4);
+    o_SetVSConstF(g_dev, 12, eyes[0], 4);
+    o_SetTexture(g_dev, D3DVERTEXTEXTURESAMPLER0, g_depthCopy);
+    g_dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    g_dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    g_dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    g_dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    for (int eye = 0; eye < 2; eye++)
+    {
+        SetEyeViewport(eye);
+        o_SetVSConstF(g_dev, 0, eyes[eye], 4);
+        *result = draw();
+    }
+    o_SetTexture(g_dev, D3DVERTEXTEXTURESAMPLER0, nullptr);
+    o_SetVertexShader(g_dev, g_vsCurrent);
+    o_SetVSConstF(g_dev, 0, g_gameConst[0], 16);
+    return true;
+}
+
 template <typename F> static HRESULT Draw(F draw)
 {
+    if (g_vr && g_rtStereo && !g_rtFinal && g_vsHash == kHudText && g_scoreDepth == 1 && stereo::HaveMatrix())
+    {
+        stereo::EyeMatrix(0, false, false);
+        HRESULT hr;
+        if (!strcmp(stereo::LastKind(), "popup") && DrawScore(draw, &hr)) return hr;
+    }
     if (g_vr && g_rtStereo && !g_rtFinal && g_vsHash == kCpuProjected && g_vsReproject)
     {
         float m[2][16], depth[4];
@@ -559,7 +745,12 @@ static void SetupDevice()
         HRESULT hr = o_CreateTexture(g_dev, w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_final, &g_finalShare);
         Log("eye target %ux%u: %#lx share %p", w, h, hr, g_finalShare);
         if (g_final) g_final->GetSurfaceLevel(0, &g_finalSurf);
-        hr = o_CreateDepthStencil(g_dev, w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &g_depth, nullptr);
+        // A readable depth format (INTZ) when the driver has it, so the score numbers can find
+        // the level surface; plain D24S8 otherwise.
+        hr = o_CreateTexture(g_dev, w, h, 1, D3DUSAGE_DEPTHSTENCIL, (D3DFORMAT)MAKEFOURCC('I', 'N', 'T', 'Z'), D3DPOOL_DEFAULT, &g_depthTex, nullptr);
+        if (g_depthTex) g_depthTex->GetSurfaceLevel(0, &g_depth);
+        else hr = o_CreateDepthStencil(g_dev, w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &g_depth, nullptr);
+        Log("eye depth is %s", g_depthTex ? "readable (INTZ)" : "D24S8");
         Log("eye depth: %#lx", hr);
         g_dev->CreateQuery(D3DQUERYTYPE_EVENT, &g_flushQuery);
     }
@@ -1069,6 +1260,7 @@ void InstallDeviceHooks(IDirect3DDevice9* dev)
         else Log("reprojection shader: %s", err ? (const char*)err->GetBufferPointer() : "compile failed");
     }
     SetupDevice();
+    if (g_vr) CreateScoreResources();
     test::PlaceWindow(dev);
     static bool watchdog;
     if (!watchdog) DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_renderThread, 0, FALSE, DUPLICATE_SAME_ACCESS);

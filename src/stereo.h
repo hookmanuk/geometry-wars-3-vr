@@ -6,7 +6,8 @@ namespace stereo
 {
     void LoadSettings();
 
-    // Which kind of camera the last EyeMatrix result was made for: level, menu, backdrop or canvas.
+    // Which kind of camera the last EyeMatrix result was made for: level, menu, backdrop, canvas
+    // or popup (the HUD camera used inside the scene pass, for the kill score numbers).
     const char* LastKind();
 
     // The eyes for the frame about to be drawn. "tracked" is false for the stand-in eyes used
@@ -29,6 +30,10 @@ namespace stereo
     // matrix taking the game's clip-space position to this eye's, and (a, b) of the game's
     // depth mapping clip z = a * w + b, from which w is recovered. False when unavailable.
     bool Reproject(int eye, float matrix[16], float depth[4]);
+
+    // The level camera of this frame: the inverse of the game's matrix (game clip space to the
+    // world) and each eye's matrix (world to that eye's clip space). False outside levels.
+    bool LevelCamera(float inverseGame[16], float eyes[2][16]);
 
     // For full-screen effects measured from the middle of the screen: where straight ahead from
     // the seat lands in one eye's image (u, v in 0..1), and how many of the game's screen

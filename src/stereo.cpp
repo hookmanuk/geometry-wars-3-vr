@@ -108,6 +108,9 @@ namespace
     // Half-width and half-height of the game's own frame as the player sees it (tangents).
     double g_frameTanX = 0.58, g_frameTanY = 0.33;
     bool g_lastSceneLevel; // the last scene camera was the level's (not the menu world's)
+    // The level camera as last used for the level itself: the game's matrix and each eye's.
+    float g_levelGame[16], g_levelEye[2][16];
+    unsigned g_levelSeen;
     bool g_loggedOrtho;
 
     // True when the view's axes are the world's, up to sign (the HUD canvas flips y).
@@ -278,7 +281,24 @@ namespace
             Mat out = Mul(proj, Mul(EyeView(eye), seated));
             for (int i = 0; i < 16; i++) g_out[e][i] = (float)out.m[i];
         }
+        if (!strcmp(g_kind, "level") && !g_steady)
+        {
+            memcpy(g_levelGame, g_game, sizeof g_levelGame);
+            memcpy(g_levelEye, g_out, sizeof g_levelEye);
+            g_levelSeen = g_frame;
+        }
     }
+}
+
+bool stereo::LevelCamera(float inverseGame[16], float eyes[2][16])
+{
+    if (!g_levelSeen || g_frame - g_levelSeen > 1) return false;
+    Mat game, inv;
+    for (int i = 0; i < 16; i++) game.m[i] = g_levelGame[i];
+    if (!Invert(game, inv)) return false;
+    for (int i = 0; i < 16; i++) inverseGame[i] = (float)inv.m[i];
+    memcpy(eyes, g_levelEye, sizeof g_levelEye);
+    return true;
 }
 
 void stereo::LoadSettings()
