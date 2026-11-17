@@ -854,6 +854,7 @@ static void VrNextFrame()
     TraceCheckRequest();
     g_stage = "game";
     if (test::RecentreRequested()) stereo::Recentre();
+    test::CaptureKey();
     if (test::SettingsChanged()) stereo::LoadSettings();
     stereo::SetEyes(eyes, tracked);
 }
@@ -1069,6 +1070,33 @@ static HRESULT __stdcall H_DrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIV
     // by dump_vertices_vs in gw3vr.ini (all of them), read back from the buffer.
     uint32_t dumpVs = g_dump ? (uint32_t)strtoul(IniString("dump_vertices_vs").c_str(), nullptr, 16) : 0;
     bool all = dumpVs && g_vsHash == dumpVs;
+    if (g_dump && g_vsUsesViewProj)
+    {
+        // Frame dumps: the range of the first three floats (the position) over the draw's vertices,
+        // and the vertex furthest from the world's centre.
+        IDirect3DVertexBuffer9* vb = nullptr;
+        UINT offset = 0, stride = 0;
+        void* data = nullptr;
+        if (SUCCEEDED(d->GetStreamSource(0, &vb, &offset, &stride)) && vb)
+        {
+            if (stride >= 12 && SUCCEEDED(vb->Lock(offset + (base + minV) * stride, numV * stride, &data, D3DLOCK_READONLY)) && data)
+            {
+                float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f }, farthest[3] = {};
+                float farR = -1;
+                for (UINT i = 0; i < numV; i++)
+                {
+                    const float* f = (const float*)((const char*)data + i * stride);
+                    for (int k = 0; k < 3; k++) { lo[k] = lo[k] < f[k] ? lo[k] : f[k]; hi[k] = hi[k] > f[k] ? hi[k] : f[k]; }
+                    float r = f[0] * f[0] + f[1] * f[1] + f[2] * f[2];
+                    if (r > farR) { farR = r; memcpy(farthest, f, sizeof farthest); }
+                }
+                fprintf(g_dump, "  bounds x %g..%g y %g..%g z %g..%g furthest (%g %g %g) r %g\n", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+                    farthest[0], farthest[1], farthest[2], sqrtf(farR));
+                vb->Unlock();
+            }
+            vb->Release();
+        }
+    }
     if (g_dump && (!g_vsUsesViewProj || all))
     {
         IDirect3DVertexBuffer9* vb = nullptr;

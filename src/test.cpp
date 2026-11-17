@@ -120,6 +120,24 @@ void test::KeepActive(HWND wnd)
     Log("the game keeps running while its window is inactive");
 }
 
+void test::CaptureKey()
+{
+    static bool wasDown;
+    static int count;
+    bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    if (down && !wasDown)
+    {
+        FILE* f = fopen((g_dir + "gw3vr_dump.req").c_str(), "w");
+        if (f) fclose(f);
+        char shot[MAX_PATH];
+        sprintf(shot, "%sgw3vr_f9_%d.bmp", g_dir.c_str(), count++);
+        f = fopen((g_dir + "gw3vr_shot.req").c_str(), "w");
+        if (f) { fputs(shot, f); fclose(f); }
+        Log("F9: capturing this moment (%s and the next frame dump)", shot);
+    }
+    wasDown = down;
+}
+
 bool test::SettingsChanged()
 {
     static unsigned frame;

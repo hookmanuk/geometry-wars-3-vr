@@ -23,6 +23,10 @@ namespace test
     // this off). Call before anything that can take activation from the window.
     void KeepActive(HWND wnd);
 
+    // F9: writes the moment out two ways, a frame dump (gw3vr_dump_N.log, the frame after) and a
+    // screenshot of both eyes (gw3vr_f9_N.bmp), so something seen in the headset can be examined.
+    void CaptureKey();
+
     // True when gw3vr.ini has been saved since the last call, so tuning needs no restart.
     bool SettingsChanged();
 
