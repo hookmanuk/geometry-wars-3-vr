@@ -137,7 +137,9 @@ O main(I i)
 )";
 static bool g_vsBackdrop;
 static bool g_vsSprites;
-static float g_gameConst[16][4];           // what the game last wrote to c0-c15
+static float g_gameConst[17][4];           // what the game last wrote to c0-c16
+static INT g_drawBase;                     // the vertex range of the indexed draw being made
+static UINT g_drawMinV, g_drawNumV;
 static uint32_t g_psHash;
 static const uint32_t kFinalPass = 0xa356001c; // colour offset and vignette, drawn to the backbuffer
 static const uint32_t kFocusBlur = 0x9545d86c; // behind pop-ups: sharp in the middle of the screen, blurred outside
@@ -448,6 +450,7 @@ float4 e0 : register(c0); float4 e1 : register(c1); float4 e2 : register(c2); fl
 float4 h0 : register(c4); float4 h1 : register(c5); float4 h2 : register(c6); float4 h3 : register(c7);
 float4 i0 : register(c8); float4 i1 : register(c9); float4 i2 : register(c10); float4 i3 : register(c11);
 float4 l0 : register(c12); float4 l1 : register(c13); float4 l2 : register(c14); float4 l3 : register(c15);
+float4 anchor : register(c16); // the centre of the text being drawn, in the HUD camera's coordinates
 sampler2D depth : register(s0);
 struct I { float4 pos : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; float4 t2 : TEXCOORD2; };
 struct O { float4 pos : POSITION; float2 t0 : TEXCOORD0; float2 t1 : TEXCOORD1; float4 t2 : TEXCOORD2; float4 t3 : TEXCOORD3; };
@@ -467,22 +470,32 @@ bool Behind(float3 p)
     float d = tex2Dlod(depth, float4(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5, 0, 0)).r;
     return d < 1 && n.z >= d;
 }
+float2 Ndc(float4 p)
+{
+    float4 h = float4(dot(h0, p), dot(h1, p), dot(h2, p), dot(h3, p));
+    return h.xy / h.w;
+}
 O main(I i)
 {
     O o;
     float4 p = float4(i.pos.xyz, 1);
     float4 hud = float4(dot(h0, p), dot(h1, p), dot(h2, p), dot(h3, p));
-    float2 ndc = hud.xy / hud.w;
-    float3 a = Unproject(ndc, 0);
-    float3 b = Unproject(ndc, 1);
-    // Default when the ray finds no surface: the point on the ray nearest the level's centre.
-    float3 dir = b - a;
-    float3 hit = a + dir * saturate(-dot(a, dir) / dot(dir, dir));
+
+    // One depth for the whole piece of text, found along the ray through its centre (c16), so
+    // its letters stay flat and whole. Every ray from the camera crosses the near and far planes,
+    // so the same fraction t along each ray is the same distance in front of the camera.
+    float2 centre = Ndc(float4(anchor.xy, 0, 1));
+    float3 a = Unproject(centre, 0);
+    float3 dir = Unproject(centre, 1) - a;
+    // Enemies are on the near side of the level: a hit beyond the level's centre is the backdrop.
+    // The default, and the limit of the search, is the point on the ray nearest the centre.
+    float limit = saturate(-dot(a, dir) / dot(dir, dir));
+    float t = limit;
     float lo = 0, hi = -1;
     for (int s = 1; s <= 96; s++)
     {
-        float t = s / 96.0;
-        if (Behind(a + dir * t)) { hi = t; lo = (s - 1) / 96.0; break; }
+        float f = limit * s / 96.0;
+        if (Behind(a + dir * f)) { hi = f; lo = limit * (s - 1) / 96.0; break; }
     }
     if (hi > 0)
     {
@@ -491,8 +504,11 @@ O main(I i)
             float m = (lo + hi) * 0.5;
             if (Behind(a + dir * m)) hi = m; else lo = m;
         }
-        hit = a + dir * hi;
+        t = hi;
     }
+    float2 ndc = hud.xy / hud.w;
+    float3 va = Unproject(ndc, 0);
+    float3 hit = va + (Unproject(ndc, 1) - va) * t;
     float4 w = float4(hit, 1);
     o.pos = float4(dot(e0, w), dot(e1, w), dot(e2, w), dot(e3, w));
     o.t0 = hud.zw;
@@ -579,7 +595,31 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
     float inv[16], eyes[2][16];
     if (!stereo::LevelCamera(inv, eyes)) return false;
     if (!CopyEyeDepth()) return false;
+    // The centre of the text, from its vertices (a few dozen, read back once).
+    float anchor[4] = { 320, 180, 0, 1 };
+    {
+        IDirect3DVertexBuffer9* vb = nullptr;
+        UINT offset = 0, stride = 0;
+        void* data = nullptr;
+        if (SUCCEEDED(g_dev->GetStreamSource(0, &vb, &offset, &stride)) && vb)
+        {
+            if (stride >= 8 && g_drawNumV && SUCCEEDED(vb->Lock(offset + (g_drawBase + g_drawMinV) * stride, g_drawNumV * stride, &data, D3DLOCK_READONLY)) && data)
+            {
+                float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
+                for (UINT i = 0; i < g_drawNumV; i++)
+                {
+                    const float* f = (const float*)((const char*)data + i * stride);
+                    for (int k = 0; k < 2; k++) { lo[k] = f[k] < lo[k] ? f[k] : lo[k]; hi[k] = f[k] > hi[k] ? f[k] : hi[k]; }
+                }
+                anchor[0] = (lo[0] + hi[0]) * 0.5f;
+                anchor[1] = (lo[1] + hi[1]) * 0.5f;
+                vb->Unlock();
+            }
+            vb->Release();
+        }
+    }
     o_SetVertexShader(g_dev, g_vsScore);
+    o_SetVSConstF(g_dev, 16, anchor, 1);
     o_SetVSConstF(g_dev, 4, g_gameConst[0], 4); // the HUD camera the game set for this draw
     o_SetVSConstF(g_dev, 8, inv, 4);
     o_SetVSConstF(g_dev, 12, eyes[0], 4);
@@ -596,7 +636,7 @@ template <typename F> static bool DrawScore(F draw, HRESULT* result)
     }
     o_SetTexture(g_dev, D3DVERTEXTEXTURESAMPLER0, nullptr);
     o_SetVertexShader(g_dev, g_vsCurrent);
-    o_SetVSConstF(g_dev, 0, g_gameConst[0], 16);
+    o_SetVSConstF(g_dev, 0, g_gameConst[0], 17);
     return true;
 }
 
@@ -1085,6 +1125,7 @@ static HRESULT __stdcall H_DrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIV
 {
     g_draws++;
     D("DrawIndexedPrimitive type %d base %d verts %u start %u prims %u", t, base, numV, start, count);
+    g_drawBase = base; g_drawMinV = minV; g_drawNumV = numV;
     if (!g_vsUsesViewProj)
     {
         sprintf(g_drawNote, "indexed type %d verts %u prims %u", t, numV, count);
@@ -1228,7 +1269,7 @@ static HRESULT __stdcall H_SetVSConstF(IDirect3DDevice9* d, UINT reg, const floa
             for (UINT i = 0; i < count * 4; i++) { uint32_t u; memcpy(&u, &f[i], 4); g_worldHash = (g_worldHash ^ u) * 16777619u; }
         if (reg == 4 && !g_camSeen && fabsf(f[0]) + fabsf(f[1]) + fabsf(f[2]) > 1) { g_row.camX = f[0]; g_row.camY = f[1]; g_row.camZ = f[2]; g_camSeen = true; }
     }
-    if (reg < 16) memcpy(g_gameConst[reg], f, (reg + count > 16 ? 16 - reg : count) * 16);
+    if (reg < 17) memcpy(g_gameConst[reg], f, (reg + count > 17 ? 17 - reg : count) * 16);
     return o_SetVSConstF(d, reg, f, count);
 }
 
