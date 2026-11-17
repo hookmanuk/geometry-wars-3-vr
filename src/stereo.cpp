@@ -107,7 +107,16 @@ namespace
     double g_sceneSx = 1.0, g_sceneSy = 1.8;
     // Half-width and half-height of the game's own frame as the player sees it (tangents).
     double g_frameTanX = 0.58, g_frameTanY = 0.33;
+    bool g_lastSceneLevel; // the last scene camera was the level's (not the menu world's)
     bool g_loggedOrtho;
+
+    // True when the view's axes are the world's, up to sign (the HUD canvas flips y).
+    bool Unrotated(const Mat& v)
+    {
+        return fabs(fabs(v.m[0]) - 1) < 1e-4 && fabs(fabs(v.m[5]) - 1) < 1e-4 && fabs(fabs(v.m[10]) - 1) < 1e-4 &&
+               fabs(v.m[1]) < 1e-4 && fabs(v.m[2]) < 1e-4 && fabs(v.m[4]) < 1e-4 && fabs(v.m[6]) < 1e-4 &&
+               fabs(v.m[8]) < 1e-4 && fabs(v.m[9]) < 1e-4;
+    }
 
     // World-to-eye for one eye, from its pose in the seated space.
     Mat EyeView(const Eye& e)
@@ -175,6 +184,19 @@ namespace
             cx = cy = cz * g_hudSize;
             oy = g_hudOffsetY;
         }
+        else if (Unrotated(view) && fabs(view.m[11]) > 1)
+        {
+            // The HUD's canvas camera used inside the scene pass, so the text gets bloom: the
+            // score numbers that rise from kills. Shown at HUD distance like the rest of the HUD,
+            // and spread by scene_zoom so each number stays over the spot it came from (the game
+            // placed it on its own screen, and the player sees the level that much closer).
+            g_kind = "popup";
+            double plane = view.m[11];
+            double spread = g_lastSceneLevel ? g_sceneZoom : 1.0;
+            cz = g_hudDistance / plane;
+            cx = cz * sx / g_sceneSx * spread;
+            cy = cz * sy / g_sceneSy * spread;
+        }
         else if (identity)
         {
             g_kind = "backdrop";
@@ -185,6 +207,7 @@ namespace
         else if (nearUnits < 50)
         {
             g_kind = "menu";
+            g_lastSceneLevel = false;
             cx = cy = cz = 1 / g_menuScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
@@ -194,6 +217,7 @@ namespace
         else
         {
             g_kind = "level";
+            g_lastSceneLevel = true;
             cx = cy = cz = 1 / g_worldScale;
             g_sceneSx = sx;
             g_sceneSy = sy;

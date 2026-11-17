@@ -71,6 +71,27 @@ screenshots). No frame-rate patch is needed.
 - A ReShade 32-bit OpenXR layer on this PC fails to load and makes the loader refuse to create
   an instance. The mod then retries with implicit layers disabled.
 
+## Fixed 2026-11-17 (second pass)
+
+- **Judder.** The game steps its world by a fixed 1/60 s. At 90 Hz that is two updates per
+  three frames, so every third frame repeated the last (a 30 Hz stutter). Frame delivery was
+  never the problem: on SteamVR 798 of 800 frames landed on consecutive vsyncs with ~7 ms spare.
+  The mod now writes 1/rate over every 1/60 constant in the loaded image (the PCGamingWiki
+  "High frame rate" hex edit, done in memory) with the rate from `XR_FB_display_refresh_rate`
+  (SteamVR reports 90.00). Result: the camera moves on every frame, and the level clock still
+  runs at real time (12 s in 12.1 s). `sim_rate` overrides. Do not derive the rate from
+  `predictedDisplayPeriod`: SteamVR varies it (45, 30 Hz during loading). Trace in
+  `notes/traces/`.
+- **Score numbers deep in the background.** They are drawn with the HUD text shader
+  (`vs_fe5eb358`/`ps_12e27094`) and the HUD canvas camera, but in the scene pass, so they get
+  bloom. That camera (near plane 1) was taken for the menu world and placed ~170 m away. An
+  unrotated camera with an offset, outside the final pass, is now the `popup` kind: placed at
+  `hud_distance`, spread by `scene_zoom` so a number stays over its kill. Checked by eye
+  disparity: the number and the HUD now shift identically between the eyes.
+- PCGamingWiki notes the higher update rate slightly changes some enemy behaviour (seekers and
+  chargers track a little faster; the Turret ability fires more; crashes with Turret on green
+  walls at 300 Hz). At 90 Hz the effect should be small; not yet checked here.
+
 ## Open
 
 1. **Headset run on SteamVR.** Scale (`world_scale`), distance (`scene_zoom`), HUD distance

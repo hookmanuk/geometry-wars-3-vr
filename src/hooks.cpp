@@ -297,7 +297,8 @@ static void TraceFinish()
 static void Census(const char* kind)
 {
     static std::unordered_map<uint64_t, int> seen;
-    if (!g_vr || !IniInt("draw_census", 0)) return;
+    static int enabled = IniInt("draw_census", 0);
+    if (!g_vr || !enabled) return;
     uint64_t key = ((uint64_t)g_vsHash << 32) ^ g_psHash ^ ((uint64_t)(uintptr_t)kind << 7) ^ (g_rtFinal ? 1 : 0) ^ (g_rtStereo ? 2 : 0);
     if (seen[key]++) return;
     Log("census: frame %u vs_%08x ps_%08x kind %s target %s", g_frame, g_vsHash, g_psHash, kind,
@@ -873,9 +874,12 @@ static HRESULT __stdcall H_DrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIV
         sprintf(g_drawNote, "indexed type %d verts %u prims %u", t, numV, count);
         g_noteBase = base; g_noteMinV = minV; g_noteNumV = numV;
     }
-    if (g_dump && !g_vsUsesViewProj)
+    // Frame dumps only: the vertices of draws that place themselves, or of the vertex shader named
+    // by dump_vertices_vs in gw3vr.ini (all of them), read back from the buffer.
+    uint32_t dumpVs = g_dump ? (uint32_t)strtoul(IniString("dump_vertices_vs").c_str(), nullptr, 16) : 0;
+    bool all = dumpVs && g_vsHash == dumpVs;
+    if (g_dump && (!g_vsUsesViewProj || all))
     {
-        // Frame dumps only: the vertices of draws that place themselves, read back from the buffer.
         IDirect3DVertexBuffer9* vb = nullptr;
         UINT offset = 0, stride = 0;
         void* data = nullptr;
@@ -883,9 +887,16 @@ static HRESULT __stdcall H_DrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIV
         {
             if (stride >= 16 && SUCCEEDED(vb->Lock(offset + (base + minV) * stride, numV * stride, &data, D3DLOCK_READONLY)) && data)
             {
-                for (UINT i = 0; i < numV && i < 8; i++)
+                for (UINT i = 0; i < numV && i < (all ? 20000u : 8u); i++)
                 {
                     const float* f = (const float*)((const char*)data + i * stride);
+                    if (all)
+                    {
+                        fprintf(g_dump, "  v %u:", i);
+                        for (UINT k = 0; k < stride / 4; k++) fprintf(g_dump, " %g/%08x", f[k], ((const uint32_t*)f)[k]);
+                        fputc('\n', g_dump);
+                        continue;
+                    }
                     fprintf(g_dump, "  vertex %u: [%g %g %g %g] [%g %g %g %g]\n", i, f[0], f[1], f[2], f[3],
                         stride >= 32 ? f[4] : 0.f, stride >= 32 ? f[5] : 0.f, stride >= 32 ? f[6] : 0.f, stride >= 32 ? f[7] : 0.f);
                 }
