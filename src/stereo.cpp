@@ -1,13 +1,19 @@
 // Per-eye view-projection matrices.
 //
 // The game writes one matrix to c0-c3: projection * view, rows in registers, so
-// clip = M * position. Two cameras use it:
-//   scene  - a moving camera with a perspective projection (levels, menu backdrop)
-//   screen - the same kind of projection with an identity view (menus, HUD), drawn as
-//            geometry standing in front of that camera
-// Both are taken apart into view and projection here. The view is kept, so the player sits
-// where the game's camera is; the head pose is applied on top and the headset's own
-// projection replaces the game's.
+// clip = M * position. It is taken apart into view and projection here. The view is kept, so
+// the player sits where the game's camera is; the head pose is applied on top and the
+// headset's own projection replaces the game's.
+//
+// The game uses four kinds of camera, and each is placed differently:
+//   level    - looks at the level from a few hundred units away (near plane 100). Shown at
+//              world_scale, and moved towards the level by scene_zoom so it fills the view.
+//   menu     - the menu backdrop: a camera a few units above a grid floor (near plane 1).
+//              Shown at menu_scale, which makes the floor a floor.
+//   backdrop - an identity view inside the scene pass: a quad fixed to the game's camera.
+//              Kept as far-off scenery covering the game's own frame.
+//   canvas   - everything drawn after post-processing: HUD and menu panels on a 640x360
+//              canvas. Shown as a panel hud_distance metres away.
 //
 // Matrices are 4x4, row-major, for column vectors.
 #include "stereo.h"
@@ -33,11 +39,14 @@ namespace
     double Len3(const double* v) { return sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
 
     // Settings (gw3vr.ini).
-    double g_worldScale;   // game units per metre for the scene camera
-    double g_screenScale;  // game units per metre for the menu/HUD camera
-    double g_hudSize;      // 1 = HUD spans the game's own field of view
-    double g_sceneOffset[3];
-    double g_screenOffset[3];
+    double g_worldScale;    // level camera: game units per metre
+    double g_sceneZoom;     // level camera: how many times closer the player sits than the game's camera
+    double g_menuScale;     // menu camera: game units per metre
+    double g_backdropScale; // backdrop quads: game units per metre
+    double g_hudDistance;   // canvas: metres from the seat to the panel
+    double g_hudSize;       // canvas: 1 = the angle the game drew it at
+    double g_hudOffsetY;    // canvas: metres up
+    double g_nearMetres;    // closest distance drawn
 
     Eye g_eyes[2];
 
@@ -50,6 +59,7 @@ namespace
     float g_game[16];
     bool g_have;
     bool g_dirty;
+    bool g_overlay;         // the matrix in g_out was made for the canvas pass
     float g_out[2][16];
 
     // Projection scales of the last scene camera, used to lay the HUD over the same field of view.
@@ -101,50 +111,73 @@ namespace
         view.m[15] = 1;
         double sx = lx / wl, sy = ly / wl;
 
-        // Depth: clip z = a * w + b in the game's projection.
+        // Depth: clip z = a * w + b in the game's projection, with w = wl * depth.
         double a = (r[2][0] * r[3][0] + r[2][1] * r[3][1] + r[2][2] * r[3][2]) / (wl * wl);
         double b = r[2][3] - a * r[3][3];
+        double nearUnits = a != 0 ? -b / a / wl : 1;
+        double farUnits = fabs(a - 1) > 1e-9 ? nearUnits * a / (a - 1) : 1e9;
 
-        bool screen = fabs(view.m[0] - 1) < 1e-4 && fabs(view.m[5] - 1) < 1e-4 && fabs(view.m[10] - 1) < 1e-4 &&
-                      fabs(view.m[3]) < 1e-3 && fabs(view.m[7]) < 1e-3 && fabs(view.m[11]) < 1e-3;
-        double scale, kx = 1, ky = 1;
-        const double* offset;
-        if (screen)
+        bool identity = fabs(view.m[0] - 1) < 1e-4 && fabs(view.m[5] - 1) < 1e-4 && fabs(view.m[10] - 1) < 1e-4 &&
+                        fabs(view.m[3]) < 1e-3 && fabs(view.m[7]) < 1e-3 && fabs(view.m[11]) < 1e-3;
+
+        // Game camera space (left-handed, z forward, game units) to the seated space
+        // (right-handed, -z forward, metres): x' = cx x, y' = cy y + oy, z' = -cz (z - shift).
+        double cx, cy, cz, oy = 0, shift = 0;
+        if (g_overlay)
         {
-            scale = g_screenScale;
-            kx = sx / g_sceneSx * g_hudSize;
-            ky = sy / g_sceneSy * g_hudSize;
-            offset = g_screenOffset;
+            // The canvas lies in the world's z = 0 plane; its depth is the origin's depth.
+            double plane = view.m[11] > 1 ? view.m[11] : 434.6;
+            cz = g_hudDistance / plane;
+            cx = cy = cz * g_hudSize;
+            oy = g_hudOffsetY;
+        }
+        else if (identity)
+        {
+            cz = 1 / g_backdropScale;
+            cx = cz * sx / g_sceneSx;
+            cy = cz * sy / g_sceneSy;
+        }
+        else if (nearUnits < 50)
+        {
+            cx = cy = cz = 1 / g_menuScale;
+            g_sceneSx = sx;
+            g_sceneSy = sy;
         }
         else
         {
-            scale = g_worldScale;
+            cx = cy = cz = 1 / g_worldScale;
             g_sceneSx = sx;
             g_sceneSy = sy;
-            offset = g_sceneOffset;
+            // Sit closer to the point the camera looks at: the level's centre, when the
+            // world origin is in front of the camera and near its axis.
+            double depth = view.m[11];
+            if (depth > 0 && fabs(view.m[3]) < 0.5 * depth && fabs(view.m[7]) < 0.5 * depth)
+                shift = depth * (1 - 1 / g_sceneZoom);
         }
-
-        // Game camera space (left-handed, z forward, game units) to the seated space
-        // (right-handed, -z forward, metres).
         Mat conv{};
-        conv.m[0] = kx / scale;  conv.m[3] = offset[0];
-        conv.m[5] = ky / scale;  conv.m[7] = offset[1];
-        conv.m[10] = -1 / scale; conv.m[11] = -offset[2];
+        conv.m[0] = cx;
+        conv.m[5] = cy;   conv.m[7] = oy;
+        conv.m[10] = -cz; conv.m[11] = cz * shift;
         conv.m[15] = 1;
         Mat seated = Mul(conv, view);
 
-        double s = scale * wl; // keeps clip w in the game's units, for shaders that fade by depth
+        // Depth range: the game's far plane, and a near plane no further than g_nearMetres.
+        double nearClip = nearUnits < g_nearMetres / cz ? nearUnits : g_nearMetres / cz;
+        double A = farUnits / (farUnits - nearClip);
+        double B = -A * nearClip * wl;
+
+        double sw = wl / cz; // clip w = wl * depth in game units, as the game's shaders expect
         for (int e = 0; e < 2; e++)
         {
             const Eye& eye = g_eyes[e];
             Mat proj{};
-            proj.m[0] = s * 2 / (eye.tanR - eye.tanL);
-            proj.m[2] = s * (eye.tanR + eye.tanL) / (eye.tanR - eye.tanL);
-            proj.m[5] = s * 2 / (eye.tanU - eye.tanD);
-            proj.m[6] = s * (eye.tanU + eye.tanD) / (eye.tanU - eye.tanD);
-            proj.m[10] = -a * s;
-            proj.m[11] = b;
-            proj.m[14] = -s;
+            proj.m[0] = sw * 2 / (eye.tanR - eye.tanL);
+            proj.m[2] = sw * (eye.tanR + eye.tanL) / (eye.tanR - eye.tanL);
+            proj.m[5] = sw * 2 / (eye.tanU - eye.tanD);
+            proj.m[6] = sw * (eye.tanU + eye.tanD) / (eye.tanU - eye.tanD);
+            proj.m[10] = -A * sw;
+            proj.m[11] = B;
+            proj.m[14] = -sw;
             Mat out = Mul(proj, Mul(EyeView(eye), seated));
             for (int i = 0; i < 16; i++) g_out[e][i] = (float)out.m[i];
         }
@@ -153,16 +186,17 @@ namespace
 
 void stereo::LoadSettings()
 {
-    g_worldScale = IniFloat("world_scale", 250.0f);
-    g_screenScale = IniFloat("screen_scale", 500.0f);
+    g_worldScale = IniFloat("world_scale", 200.0f);
+    g_sceneZoom = IniFloat("scene_zoom", 1.6f);
+    g_menuScale = IniFloat("menu_scale", 2.5f);
+    g_backdropScale = IniFloat("backdrop_scale", 10.0f);
+    g_hudDistance = IniFloat("hud_distance", 1.1f);
     g_hudSize = IniFloat("hud_size", 1.0f);
-    g_sceneOffset[0] = IniFloat("scene_offset_x", 0);
-    g_sceneOffset[1] = IniFloat("scene_offset_y", 0);
-    g_sceneOffset[2] = IniFloat("scene_offset_z", 0);
-    g_screenOffset[0] = IniFloat("screen_offset_x", 0);
-    g_screenOffset[1] = IniFloat("screen_offset_y", 0);
-    g_screenOffset[2] = IniFloat("screen_offset_z", 0);
-    Log("stereo: world_scale %g screen_scale %g hud_size %g", g_worldScale, g_screenScale, g_hudSize);
+    g_hudOffsetY = IniFloat("hud_offset_y", 0.0f);
+    g_nearMetres = IniFloat("near_metres", 0.1f);
+    g_dirty = true;
+    Log("stereo: world_scale %g scene_zoom %g menu_scale %g hud_distance %g hud_size %g",
+        g_worldScale, g_sceneZoom, g_menuScale, g_hudDistance, g_hudSize);
 }
 
 void stereo::Recentre() { g_recentre = true; }
@@ -214,8 +248,9 @@ void stereo::SetGameMatrix(const float* rows)
 
 bool stereo::HaveMatrix() { return g_have; }
 
-const float* stereo::EyeMatrix(int eye)
+const float* stereo::EyeMatrix(int eye, bool overlay)
 {
+    if (overlay != g_overlay) { g_overlay = overlay; g_dirty = true; }
     if (g_dirty) Compute();
     return g_out[eye];
 }

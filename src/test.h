@@ -23,6 +23,9 @@ namespace test
     // this off). Call before anything that can take activation from the window.
     void KeepActive(HWND wnd);
 
+    // True when gw3vr.ini has been saved since the last call, so tuning needs no restart.
+    bool SettingsChanged();
+
     // With test_window=1 in gw3vr.ini, shrinks the game's window and keeps it from covering the desktop.
     void PlaceWindow(IDirect3DDevice9* dev);
 }

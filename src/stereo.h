@@ -17,6 +17,7 @@ namespace stereo
     void SetGameMatrix(const float* rows);
     bool HaveMatrix();
 
-    // The replacement for c0-c3 for one eye (0 left, 1 right).
-    const float* EyeMatrix(int eye);
+    // The replacement for c0-c3 for one eye (0 left, 1 right). "overlay" is true for draws made
+    // after post-processing, straight to the frame: the HUD and menu panels.
+    const float* EyeMatrix(int eye, bool overlay);
 }

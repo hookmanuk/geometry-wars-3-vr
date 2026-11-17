@@ -88,6 +88,7 @@ static float g_rtScaleX = 1, g_rtScaleY = 1;
 static D3DVIEWPORT9 g_viewport;            // the game's viewport, scaled to the bound target
 static int g_viewportState;                // 0 = g_viewport is set, 1 = an eye's half is set
 static unsigned g_rtWidth;
+static bool g_rtFinal;                     // the bound target is the frame itself (g_final)
 static bool g_vsUsesViewProj;
 static uint32_t g_psHash;
 static const uint32_t kFinalPass = 0xa356001c; // colour offset and vignette, drawn to the backbuffer
@@ -243,7 +244,7 @@ template <typename F> static HRESULT Draw(F draw)
     for (int eye = 0; eye < 2; eye++)
     {
         SetEyeViewport(eye);
-        o_SetVSConstF(g_dev, 0, stereo::EyeMatrix(eye), 4);
+        o_SetVSConstF(g_dev, 0, stereo::EyeMatrix(eye, g_rtFinal), 4);
         hr = draw();
     }
     return hr;
@@ -253,6 +254,7 @@ template <typename F> static HRESULT Draw(F draw)
 static void TargetChanged(IDirect3DSurface9* s)
 {
     g_rtStereo = false;
+    g_rtFinal = s && s == g_finalSurf;
     g_rtScaleX = g_rtScaleY = 1;
     g_viewportState = 0;
     if (!s) return;
@@ -343,6 +345,7 @@ static void VrNextFrame()
     bool tracked = vr::BeginFrame(eyes);
     g_stage = "game";
     if (test::RecentreRequested()) stereo::Recentre();
+    if (test::SettingsChanged()) stereo::LoadSettings();
     stereo::SetEyes(eyes, tracked);
 }
 

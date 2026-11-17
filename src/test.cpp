@@ -120,6 +120,19 @@ void test::KeepActive(HWND wnd)
     Log("the game keeps running while its window is inactive");
 }
 
+bool test::SettingsChanged()
+{
+    static unsigned frame;
+    static FILETIME last;
+    if (++frame % 30) return false;
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExA((g_dir + "gw3vr.ini").c_str(), GetFileExInfoStandard, &data)) return false;
+    if (!CompareFileTime(&data.ftLastWriteTime, &last)) return false;
+    bool first = !last.dwLowDateTime && !last.dwHighDateTime;
+    last = data.ftLastWriteTime;
+    return !first;
+}
+
 void test::Install()
 {
     if (!o_XInputGetState) PatchXInput();
