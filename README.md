@@ -33,6 +33,23 @@ and Windows 10 or 11.
 
 To play flat again, set `vr=0` in `gw3vr.ini` or delete `d3d9.dll`.
 
+If the game starts flat in the headset's place, `gw3vr.log` in the game folder says why. The usual
+cause is an OpenXR runtime with no 32-bit support: set SteamVR as the active OpenXR runtime
+(SteamVR settings, OpenXR).
+
+### Linux (Steam Proton) — untested
+
+The game is 32-bit, and Proton gained 32-bit OpenXR only in Proton Experimental (October 2026).
+Older and stable Proton versions have no 32-bit OpenXR, so the game runs flat. To try it:
+
+1. Install the mod files in the game folder as above.
+2. In the game's Steam properties, set Compatibility to **Proton Experimental** and the launch
+   options to `PROTON_USE_WOW64=1 %command%`.
+3. Start your Linux VR runtime (SteamVR, or Monado/WiVRn), then the game.
+
+`gw3vr.log` shows `running under Wine/Proton` and then either `OpenXR runtime: ...` (VR started)
+or what was missing. Reports of either result are welcome as GitHub issues, with `gw3vr.log` attached.
+
 **Controls added by the mod**
 
 | Key | Does |

@@ -209,6 +209,14 @@ float4 ps(V i) : SV_Target
         }
     }
 
+    // Wine and Proton export wine_get_version from ntdll; Windows does not.
+    const char* WineVersion()
+    {
+        typedef const char* (__cdecl* Fn)();
+        Fn fn = (Fn)GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version");
+        return fn ? fn() : nullptr;
+    }
+
     void PollEvents()
     {
         XrEventDataBuffer ev{ XR_TYPE_EVENT_DATA_BUFFER };
@@ -262,16 +270,36 @@ bool vr::Init()
     std::string runtime = IniString("runtime_json");
     if (!runtime.empty()) SetEnvironmentVariableA("XR_RUNTIME_JSON", runtime.c_str());
 
+    const char* wine = WineVersion();
+    if (wine) Log("running under Wine/Proton (wine %s)", wine);
+
     // The refresh-rate extension, when the runtime has it, gives the headset's actual rate.
-    bool haveRate = false;
+    bool haveRate = false, haveD3D11 = false;
     {
         uint32_t count = 0;
-        xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr);
+        XrResult r = xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr);
         std::vector<XrExtensionProperties> props(count, { XR_TYPE_EXTENSION_PROPERTIES });
-        if (count && XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, props.data())))
+        std::string names;
+        if (count && XR_SUCCEEDED(r = xrEnumerateInstanceExtensionProperties(nullptr, count, &count, props.data())))
             for (auto& p : props)
+            {
                 if (!strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME)) haveRate = true;
-        Log("OpenXR: %u extensions, %s %s", count, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME, haveRate ? "available" : "not available");
+                if (!strcmp(p.extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME)) haveD3D11 = true;
+                names += " ";
+                names += p.extensionName;
+            }
+        Log("OpenXR: %u extensions (%d):%s", count, r, names.c_str());
+        Log("OpenXR: %s %s, %s %s", XR_KHR_D3D11_ENABLE_EXTENSION_NAME, haveD3D11 ? "available" : "NOT available",
+            XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME, haveRate ? "available" : "not available");
+        if (!haveD3D11)
+        {
+            // No 32-bit runtime with D3D11 support: the loader then lists only its own extensions.
+            if (wine)
+                Log("OpenXR: no 32-bit OpenXR runtime in this Proton. It needs Proton Experimental (October 2026 or "
+                    "newer) with PROTON_USE_WOW64=1 in the game's launch options, and SteamVR or Monado/WiVRn running");
+            else
+                Log("OpenXR: the active 32-bit OpenXR runtime is missing or has no D3D11 support; SteamVR has both");
+        }
     }
     const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME };
     XrInstanceCreateInfo ici{ XR_TYPE_INSTANCE_CREATE_INFO };
