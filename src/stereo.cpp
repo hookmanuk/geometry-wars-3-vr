@@ -317,13 +317,13 @@ bool stereo::LevelCamera(float inverseGame[16], float eyes[2][16], float seat[4]
 
 void stereo::LoadSettings()
 {
-    g_worldScale = IniFloat("world_scale", 200.0f);
+    g_worldScale = IniFloat("world_scale", 100.0f);
     g_sceneZoom = IniFloat("scene_zoom", 1.6f);
     g_menuScale = IniFloat("menu_scale", 2.5f);
     g_backdropScale = IniFloat("backdrop_scale", 10.0f);
     g_hudDistance = IniFloat("hud_distance", 1.1f);
     g_hudSize = IniFloat("hud_size", 1.0f);
-    g_hudOffsetY = IniFloat("hud_offset_y", 0.0f);
+    g_hudOffsetY = IniFloat("hud_offset_y", 0.1f);
     g_nearMetres = IniFloat("near_metres", 0.1f);
     g_steadyBackground = IniInt("steady_background", 1) != 0;
     g_dirty = true;

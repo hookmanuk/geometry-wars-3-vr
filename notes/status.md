@@ -1,13 +1,13 @@
 # Status and findings
 
-Last updated 2026-11-17.
+Last updated 2026-11-18.
 
 ## Where it stands
 
-Everything below was checked on a 32-bit build of the OpenXR Simulator (Quest 3 profile,
-2880x2880 per eye, 90 Hz), driven by the injected controller. **Nothing has been seen in a
-real headset or on SteamVR yet**, so comfort, depth, scale and pacing on the real compositor
-are unjudged.
+Played in a headset on SteamVR at 90 Hz (menus, level select, Adventure levels 1 and 2), with
+the settings now shipped in `dist/gw3vr.ini`. The first checks below were made on a 32-bit build
+of the OpenXR Simulator (Quest 3 profile, 2880x2880 per eye, 90 Hz), driven by the injected
+controller.
 
 | Screen | Result |
 |---|---|
@@ -85,9 +85,10 @@ screenshots). No frame-rate patch is needed.
 - **Score numbers deep in the background.** They are drawn with the HUD text shader
   (`vs_fe5eb358`/`ps_12e27094`) and the HUD canvas camera, but in the scene pass, so they get
   bloom. That camera (near plane 1) was taken for the menu world and placed ~170 m away. An
-  unrotated camera with an offset, outside the final pass, is now the `popup` kind.
-  First placed on the HUD panel; Matt found them landing too close to the ship (a flat panel
-  can only approximate the level's perspective). Now (`score_depth=level`, default) the eye
+  unrotated camera with an offset, outside the final pass, is now the `popup` kind and is
+  shown on the HUD panel (`score_depth=hud`, the default). In the headset those numbers sit
+  closer to the middle than the kills (a flat panel can only approximate the level's
+  perspective). The experimental `score_depth=level` tries to fix that: the eye
   depth buffer is INTZ, the left eye's depth is copied to a quarter-size R32F texture at the
   first number of a frame, and a replacement for `vs_fe5eb358` marches each vertex's ray from
   the game's level camera through its screen position until it meets that depth (96 steps +
@@ -95,15 +96,18 @@ screenshots). No frame-rate patch is needed.
   buffer holds only the backdrop and the level surface (`vs_a877f050`), so the hit is where
   the enemy was. Checked by disparity: a "10" shifts between the eyes like the planet surface
   under it (32 px vs 25 px for an enemy floating just above it), not like the HUD. 90.0 FPS
-  with a number drawn every frame, frame cost 2.4 ms. `score_depth=hud` keeps the panel.
+  with a number drawn every frame, frame cost 2.4 ms. It was then changed to keep the numbers
+  at HUD distance and use the march only for direction (the depth was fine). It still flashes
+  lines from a point in the top-left corner on some kills, with the cause not found; only this
+  mode does it (proved by `score_depth=hud`). A CPU replay of the shader against read-back depth
+  is the planned way to find the bad vertices.
 - PCGamingWiki notes the higher update rate slightly changes some enemy behaviour (seekers and
   chargers track a little faster; the Turret ability fires more; crashes with Turret on green
   walls at 300 Hz). At 90 Hz the effect should be small; not yet checked here.
 
 ## Open
 
-1. **Headset run on SteamVR.** Scale (`world_scale`), distance (`scene_zoom`), HUD distance
-   and the steady backdrop are first guesses made from screenshots.
+1. **Score numbers** on the HUD panel sit towards the middle; `score_depth=level` flashes (above).
 2. **Bloom crosses the seam.** The blur passes sample across the middle of the side-by-side
    image, so strong glow at the inner edge of one eye can leak a little into the other.
    Fix: draw the two blur passes per eye with clamped sampling.
@@ -114,4 +118,6 @@ screenshots). No frame-rate patch is needed.
    any shader that draws into the eyes without the matrix ("unhandled").
 5. The two "unhandled" lines at frame 1 are start-up draws made before any camera exists and
    are harmless.
-6. Anti-aliasing: the game has none. `render_scale` above 1 supersamples; the cost is low.
+6. Anti-aliasing: the game has none. `render_scale` above 1 supersamples (frame cost about 5.6 ms
+   at 2 on an RTX 5090). Softness is mostly the game's own: bloom, glow-profile line textures and
+   a 256x256 floor-grid texture without mipmaps (`bloom`, `anisotropy`, `grid_upscale` settings).
