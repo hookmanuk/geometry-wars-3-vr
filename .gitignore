@@ -4,3 +4,4 @@ scratch/
 *.obj
 *.pdb
 save_backup/
+release/

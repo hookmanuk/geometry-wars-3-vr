@@ -159,7 +159,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         g_dir = path;
         g_dir.resize(g_dir.find_last_of('\\') + 1);
         g_log = fopen((g_dir + "gw3vr.log").c_str(), "w");
-        Log("gw3vr proxy loaded from %s", path);
+        Log("gw3vr %s loaded from %s", GW3VR_VERSION, path);
     }
     return TRUE;
 }
