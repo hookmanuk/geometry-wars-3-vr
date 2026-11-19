@@ -10,7 +10,7 @@
 #include <cstring>
 #include <string>
 
-#define GW3VR_VERSION "0.1"
+#define GW3VR_VERSION "0.1.1"
 
 // Folder holding GW3.exe (with a trailing backslash).
 extern std::string g_dir;
