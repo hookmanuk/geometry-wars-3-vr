@@ -106,7 +106,10 @@ static HRESULT __stdcall H_CreateDeviceEx(IDirect3D9Ex* self, UINT adapter, D3DD
     Log("CreateDeviceEx adapter %u type %d flags %#x", adapter, type, flags);
     LogPP(pp);
     if (IniInt("vr", 1)) test::KeepActive(wnd ? wnd : pp->hDeviceWindow);
-    if (vr::Init()) { VrPresentParameters(pp); mode = nullptr; }
+    // With VR on, D3D gets a changed copy: the game keeps its own parameters and compares them
+    // with its settings every frame, so changing them in place made it reset forever.
+    D3DPRESENT_PARAMETERS vrpp;
+    if (vr::Init()) { vrpp = *pp; VrPresentParameters(&vrpp); pp = &vrpp; mode = nullptr; }
     else Log("VR is off: the game runs unchanged");
     HRESULT hr = o_CreateDeviceEx(self, adapter, type, wnd, flags, pp, mode, out);
     Log("  -> %#lx", hr);

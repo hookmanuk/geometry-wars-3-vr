@@ -1013,7 +1013,8 @@ static HRESULT __stdcall H_PresentEx(IDirect3DDevice9Ex* d, const RECT* a, const
 static HRESULT __stdcall H_Reset(IDirect3DDevice9* d, D3DPRESENT_PARAMETERS* pp)
 {
     Log("Reset %ux%u windowed %d", pp->BackBufferWidth, pp->BackBufferHeight, pp->Windowed);
-    if (g_vr) VrPresentParameters(pp);
+    D3DPRESENT_PARAMETERS vrpp; // a changed copy: see H_CreateDeviceEx
+    if (g_vr) { vrpp = *pp; VrPresentParameters(&vrpp); pp = &vrpp; }
     HRESULT hr = o_Reset(d, pp);
     Log("  -> %#lx", hr);
     SetupDevice();
@@ -1023,7 +1024,8 @@ static HRESULT __stdcall H_Reset(IDirect3DDevice9* d, D3DPRESENT_PARAMETERS* pp)
 static HRESULT __stdcall H_ResetEx(IDirect3DDevice9Ex* d, D3DPRESENT_PARAMETERS* pp, D3DDISPLAYMODEEX* m)
 {
     Log("ResetEx %ux%u windowed %d", pp->BackBufferWidth, pp->BackBufferHeight, pp->Windowed);
-    if (g_vr) { VrPresentParameters(pp); m = nullptr; }
+    D3DPRESENT_PARAMETERS vrpp; // a changed copy: see H_CreateDeviceEx
+    if (g_vr) { vrpp = *pp; VrPresentParameters(&vrpp); pp = &vrpp; m = nullptr; }
     HRESULT hr = o_ResetEx(d, pp, m);
     Log("  -> %#lx", hr);
     SetupDevice();
