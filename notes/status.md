@@ -110,8 +110,8 @@ screenshots). No frame-rate patch is needed.
 - With the game set to fullscreen (`WindowMode` 1 in `%LOCALAPPDATA%\GeometryWars3Dimensions\Settings`)
   and VR on, it called ResetEx about 550 times a second and never drew a frame (first reported
   under Proton, then reproduced on Windows). The mod made the device windowed by editing the
-  game's own D3DPRESENT_PARAMETERS in place. The game keeps that struct (`GW3.exe+0x433364`,
-  `Windowed` at `+0x433384`) and each frame (`GW3.exe+0x11e8f0`) compares `Windowed` with its
+  game's own D3DPRESENT_PARAMETERS in place. The game keeps that struct (`GW3.exe+0x435364`,
+  `Windowed` at `+0x435384`) and each frame (`GW3.exe+0x11e8f0`) compares `Windowed` with its
   window-mode setting, resetting when they differ. D3D now gets a changed copy. Checked in window
   modes 0, 1 and 2 on the simulator: no resets, eyes submitted, menu correct in both eyes.
 
