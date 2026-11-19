@@ -337,6 +337,7 @@ bool vr::Init()
     xrGetInstanceProcAddr(g_instance, "xrGetD3D11GraphicsRequirementsKHR", (PFN_xrVoidFunction*)&getRequirements);
     if (!getRequirements || !Check(getRequirements(g_instance, g_system, &req), "graphics requirements")) return false;
     if (!CreateD3D11(req.adapterLuid)) return false;
+    Log("OpenXR: D3D11 device ready, creating the session");
 
     XrGraphicsBindingD3D11KHR binding{ XR_TYPE_GRAPHICS_BINDING_D3D11_KHR };
     binding.device = g_d3d;

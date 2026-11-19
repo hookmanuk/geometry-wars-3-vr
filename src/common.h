@@ -17,6 +17,9 @@ extern std::string g_dir;
 
 void Log(const char* fmt, ...);
 
+// What the mod's frame code is doing on the render thread, for crash and hang reports.
+const char* CurrentStage();
+
 // Replaces vt[idx] with fn and stores the previous entry in *orig.
 void HookVt(void** vt, int idx, void* fn, void** orig);
 

@@ -148,6 +148,58 @@ DWORD WINAPI P_D3DPERF_GetStatus() { return ((DWORD(WINAPI*)())Real("D3DPERF_Get
 
 }
 
+// Names the module an address is in, as "name+offset".
+static void Where(const void* addr, char* out, size_t n)
+{
+    HMODULE m = nullptr;
+    char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)addr, &m) && m)
+        GetModuleFileNameA(m, path, MAX_PATH);
+    const char* name = strrchr(path, '\\');
+    name = name ? name + 1 : path;
+    snprintf(out, n, "%s+%#x", name, (unsigned)((const char*)addr - (const char*)m));
+}
+
+// Logs crashes, for reports from setups we cannot run (such as Proton). It only looks: the
+// exception goes on to whatever handles it. The game and its DRM may raise and handle some of
+// these themselves, so only the first few are logged.
+static LONG CALLBACK CrashLog(EXCEPTION_POINTERS* ep)
+{
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_PRIV_INSTRUCTION && code != 0xC0000409 /* stack buffer overrun */)
+        return EXCEPTION_CONTINUE_SEARCH;
+    static volatile LONG count;
+    if (InterlockedIncrement(&count) > 4) return EXCEPTION_CONTINUE_SEARCH;
+    char at[MAX_PATH + 16];
+    Where(ep->ExceptionRecord->ExceptionAddress, at, sizeof at);
+    ULONG_PTR info0 = ep->ExceptionRecord->NumberParameters > 1 ? ep->ExceptionRecord->ExceptionInformation[0] : 0;
+    ULONG_PTR info1 = ep->ExceptionRecord->NumberParameters > 1 ? ep->ExceptionRecord->ExceptionInformation[1] : 0;
+    Log("EXCEPTION %#lx at %s (thread %lu, %s %p), mod stage '%s'", code, at, GetCurrentThreadId(),
+        info0 == 0 ? "reading" : info0 == 1 ? "writing" : "executing", (void*)info1, CurrentStage());
+#ifdef _M_IX86
+    // Return addresses on the stack that point into a loaded module's code.
+    const DWORD* sp = (const DWORD*)ep->ContextRecord->Esp;
+    std::string stack;
+    int found = 0;
+    for (int i = 0; i < 256 && found < 12; i++)
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(sp + i, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) break;
+        DWORD v = sp[i];
+        if (!VirtualQuery((void*)v, &mbi, sizeof mbi) || mbi.Type != MEM_IMAGE ||
+            !(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) continue;
+        char w[MAX_PATH + 16];
+        Where((void*)v, w, sizeof w);
+        stack += " ";
+        stack += w;
+        found++;
+    }
+    Log("  stack:%s", stack.c_str());
+#endif
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
@@ -160,6 +212,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         g_dir.resize(g_dir.find_last_of('\\') + 1);
         g_log = fopen((g_dir + "gw3vr.log").c_str(), "w");
         Log("gw3vr %s loaded from %s", GW3VR_VERSION, path);
+        AddVectoredExceptionHandler(0, CrashLog);
     }
     return TRUE;
 }

@@ -309,6 +309,7 @@ static void Census(const char* kind)
 
 // Where the render thread is, for the stall report below.
 static const char* volatile g_stage = "game";
+const char* CurrentStage() { return g_stage; }
 
 static HANDLE g_renderThread;
 
